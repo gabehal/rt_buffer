@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>   // for strcmp
 #include <pthread.h> // for pthread_setschedparam, sched_param, SCHED_FIFO
+#include <sys/mman.h>
 
 
 // std::mutex cout_mtx;
@@ -82,6 +83,14 @@ int main(int argc, char* argv[]){
         if (strcmp(argv[i], "--rt") == 0){
             // enable real-time mode
             use_rt = true;
+        }
+    }
+
+    if (use_rt){
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+            std::cerr << "mlockall FAILED: " << strerror(errno) << " (likely needs root)\n";
+        } else {
+            std::cerr << "memory locked, no page faults from swapping\n";
         }
     }
 
