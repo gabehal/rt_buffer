@@ -28,23 +28,33 @@ The program measures three numbers, all in microseconds:
 
 ## Files
 - `thread.cpp`: the whole program, with the threads, the ring buffer, and the statistics.
-- `rt_bench.sh`: a Linux benchmark battery. It runs `cyclictest` (a standard latency tester)
-  under several `stress-ng` loads, then a 45-minute soak test and a hardware latency check.
-  The results go to `results/<timestamp>/`.
+- `rt_bench.sh`: a Linux benchmark battery with two modes. By default it runs `cyclictest`
+  (a standard latency tester) to measure the kernel on its own. With `--thread` it builds
+  `thread.cpp` with `-O2` and runs it with `--rt` instead. Both modes use the same `stress-ng`
+  loads, then a 45-minute soak test and a hardware latency check (`hwlatdetect`). The results
+  go to `results/<timestamp>_cyclictest/` or `results/<timestamp>_thread/`.
 - `.gitignore`: keeps the compiled `thread` binary out of git. Rebuild it locally from source.
 
 ## How to build and run
     g++ -std=c++17 -O2 -pthread thread.cpp -o thread   # same command on the Mac and on Linux
     ./thread            # press Ctrl-C to stop and print the stats
     sudo ./thread --rt  # locks memory and gives the control thread real-time priority
-    ./rt_bench.sh       # Linux only: measures the kernel baseline
+    ./rt_bench.sh           # Linux only: kernel baseline with cyclictest
+    ./rt_bench.sh --thread  # Linux only: same battery, with this program instead
 
 `--rt` locks all memory in RAM (`mlockall`), so the loop never stalls on a page fault.
 It also puts the control thread on `SCHED_FIFO` priority 50. Both need root on Linux.
 
 ## Where things stand
-The pipeline builds and runs on the Mac and prints its statistics. Nothing has run on Linux
-yet, so there's no kernel baseline and no real numbers for this program.
+The pipeline builds and runs on the Mac and prints its statistics. The cyclictest kernel
+baseline has been run on Linux. `rt_bench.sh --thread` is ready but hasn't run on Linux yet,
+so there are no real numbers for this program so far.
+
+**Comparing the two runs.** cyclictest's latency is how late it woke up after its 1 ms timer,
+which is the same idea as this program's `jitter`. Both are in microseconds. The setups aren't
+identical: cyclictest runs one thread per CPU at priority 99, while this program runs one
+control thread at priority 50 next to the vision and log threads, and the log thread
+busy-waits. Both still preempt `stress-ng`, which runs at normal priority.
 
 ## Decisions and why
 - **2026-09-26: vision uses a latest-value buffer.** Control only cares about the newest
@@ -56,6 +66,10 @@ yet, so there's no kernel baseline and no real numbers for this program.
 - **2026-09-30: build with `-O2` and record the build flags with every benchmark.** Unoptimized
   code makes `tick_duration` look slower than a real build would be, and numbers from different
   flags can't be compared.
+- **2026-09-30: `rt_bench.sh --thread` builds the binary itself.** The flags are then fixed and
+  written to `metadata.txt`, so a stale or debug build can't sneak into a benchmark.
+- **2026-09-30: the benchmark stops the program with SIGINT** (`timeout -s INT`). That uses the
+  program's normal Ctrl-C shutdown, so it prints its statistics into the log.
 
 ## Open questions / known issues
 - **The log can lose data.** `log_ring` keeps only the latest value, so if the log thread falls
@@ -70,10 +84,15 @@ yet, so there's no kernel baseline and no real numbers for this program.
 
 ## What's next
 1. Design and build an SPSC queue for `log_ring`, so no samples are lost.
-2. On Linux, run `rt_bench.sh` to get the kernel-only baseline.
-3. Swap this program into the benchmark, keep the load commands identical, and compare.
+2. On Linux, run `./rt_bench.sh --thread`. Check each log for "SCHED_FIFO priority 50 applied"
+   to confirm RT mode was active, then compare `jitter` against the cyclictest baseline.
 
 ## Change log
+### 2026-09-30: Thread mode for the benchmark script
+`rt_bench.sh --thread` runs the same battery with this program in place of cyclictest, so the two
+can be compared directly. The load commands are unchanged. The mode is now in the results folder
+name and the metadata, and the script is executable.
+
 ### 2026-09-30: Build command now uses -O2
 The documented build now includes `-O2`, so measurements reflect optimized code. Benchmark
 metadata should include the build flags.
