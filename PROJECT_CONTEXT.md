@@ -31,6 +31,7 @@ The program measures three numbers, all in microseconds:
 - `rt_bench.sh`: a Linux benchmark battery. It runs `cyclictest` (a standard latency tester)
   under several `stress-ng` loads, then a 45-minute soak test and a hardware latency check.
   The results go to `results/<timestamp>/`.
+- `.gitignore`: keeps the compiled `thread` binary out of git. Rebuild it locally from source.
 
 ## How to build and run
     clang++ -std=c++17 -O2 -pthread thread.cpp -o thread   # on Linux, g++ with the same flags
@@ -63,7 +64,6 @@ yet, so there's no kernel baseline and no real numbers for this program.
   `read()` uses the default (strongest) memory ordering. Is acquire enough?
 - `<atomic>` isn't included directly. The code only compiles because another header pulls it in.
 - The log thread busy-waits, which burns a whole CPU core.
-- The compiled `thread` binary is tracked in git. Should it be in a `.gitignore`?
 
 ## What's next
 1. Design and build an SPSC queue for `log_ring`, so no samples are lost.
@@ -71,6 +71,10 @@ yet, so there's no kernel baseline and no real numbers for this program.
 3. Swap this program into the benchmark, keep the load commands identical, and compare.
 
 ## Change log
+### 2026-09-30: Stop tracking the compiled binary
+Added a `.gitignore` for `thread` and removed it from git, because a build output doesn't
+belong in version control. The local copy is kept.
+
 ### 2026-09-30: Project docs
 Added `CLAUDE.md` (rules for working in the repo) and this file, so project context and history
 survive between sessions.
