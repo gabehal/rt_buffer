@@ -34,7 +34,7 @@ The program measures three numbers, all in microseconds:
 - `.gitignore`: keeps the compiled `thread` binary out of git. Rebuild it locally from source.
 
 ## How to build and run
-    clang++ -std=c++17 -O2 -pthread thread.cpp -o thread   # on Linux, g++ with the same flags
+    g++ -std=c++17 -O2 -pthread thread.cpp -o thread   # same command on the Mac and on Linux
     ./thread            # press Ctrl-C to stop and print the stats
     sudo ./thread --rt  # locks memory and gives the control thread real-time priority
     ./rt_bench.sh       # Linux only: measures the kernel baseline
@@ -53,6 +53,9 @@ yet, so there's no kernel baseline and no real numbers for this program.
   duration. That way lateness in one tick doesn't push every later tick back.
 - **2026-09-26: only the control thread gets real-time priority.** It's the only thread with a
   hard deadline.
+- **2026-09-30: build with `-O2` and record the build flags with every benchmark.** Unoptimized
+  code makes `tick_duration` look slower than a real build would be, and numbers from different
+  flags can't be compared.
 
 ## Open questions / known issues
 - **The log can lose data.** `log_ring` keeps only the latest value, so if the log thread falls
@@ -71,6 +74,10 @@ yet, so there's no kernel baseline and no real numbers for this program.
 3. Swap this program into the benchmark, keep the load commands identical, and compare.
 
 ## Change log
+### 2026-09-30: Build command now uses -O2
+The documented build now includes `-O2`, so measurements reflect optimized code. Benchmark
+metadata should include the build flags.
+
 ### 2026-09-30: Stop tracking the compiled binary
 Added a `.gitignore` for `thread` and removed it from git, because a build output doesn't
 belong in version control. The local copy is kept.
