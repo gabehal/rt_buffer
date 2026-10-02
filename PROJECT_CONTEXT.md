@@ -1,6 +1,6 @@
 # Project Context
 
-Last updated: 2026-09-30
+Last updated: 2026-10-02
 
 ## What this project is
 A hands-on way to learn real-time programming in C++. The goal is a control loop that runs
@@ -32,7 +32,8 @@ The program measures three numbers, all in microseconds:
   (a standard latency tester) to measure the kernel on its own. With `--thread` it builds
   `thread.cpp` with `-O2` and runs it with `--rt` instead. Both modes use the same `stress-ng`
   loads, then a 45-minute soak test and a hardware latency check (`hwlatdetect`). The results
-  go to `results/<timestamp>_cyclictest/` or `results/<timestamp>_thread/`.
+  go to `results/<timestamp>_cyclictest/` or `results/<timestamp>_thread/`. The bottom of the
+  file has a plain-English walkthrough for readers new to bash.
 - `.gitignore`: keeps the compiled `thread` binary out of git. Rebuild it locally from source.
 
 ## How to build and run
@@ -81,6 +82,9 @@ busy-waits. Both still preempt `stress-ng`, which runs at normal priority.
   `read()` uses the default (strongest) memory ordering. Is acquire enough?
 - `<atomic>` isn't included directly. The code only compiles because another header pulls it in.
 - The log thread busy-waits, which burns a whole CPU core.
+- **Test 08 may run with no load.** In `rt_bench.sh`, `--sequential` normally needs a number
+  after it. If stress-ng rejects the line, test 08 measures an idle machine. Check the terminal
+  output. Fixing it means re-running the cyclictest baseline too, so both runs use the same load.
 
 ## What's next
 1. Design and build an SPSC queue for `log_ring`, so no samples are lost.
@@ -88,6 +92,12 @@ busy-waits. Both still preempt `stress-ng`, which runs at normal priority.
    to confirm RT mode was active, then compare `jitter` against the cyclictest baseline.
 
 ## Change log
+### 2026-10-02: Explained rt_bench.sh for beginners
+Added comments on the edge cases throughout `rt_bench.sh`, plus a plain-English walkthrough at
+the bottom. Each walkthrough step is numbered and matches a `[STEP N]` marker in the code.
+No behaviour changed. `CLAUDE.md` now describes this as the standard way to add pseudocode
+to a file.
+
 ### 2026-09-30: Thread mode for the benchmark script
 `rt_bench.sh --thread` runs the same battery with this program in place of cyclictest, so the two
 can be compared directly. The load commands are unchanged. The mode is now in the results folder

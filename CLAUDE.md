@@ -21,6 +21,17 @@ what exists, decisions, and history, lives in `PROJECT_CONTEXT.md`.
   build flags).
 - Real-time hot paths: no allocation, locks, blocking I/O, or printing.
 
+## When asked for pseudocode in a file
+Example: the walkthrough at the bottom of `rt_bench.sh`.
+- Put it in a comment block at the bottom of that file, written for a beginner/intermediate
+  reader, so they can follow the whole file without reading the code.
+- Split it into numbered steps that follow the code from top to bottom, and give each step's
+  reason in parentheses, especially for edge cases.
+- Put a matching `# ----- [STEP N] short title -----` marker above that part of the code.
+  Searching for `[STEP N]` should land on both the code and its explanation.
+- Also comment edge cases inline in the code. Comments only: never change behaviour.
+- When the code changes later, update the steps, markers, and numbering together.
+
 ## Keeping the docs current
 At session start: read `PROJECT_CONTEXT.md`. If it disagrees with the code, trust the code,
 tell the user, and fix the doc.
@@ -30,7 +41,7 @@ Before every commit and at session end:
 2. Rewrite every section of `PROJECT_CONTEXT.md` the change affects so it describes the code
    as it is now. Delete lines that are no longer true.
 3. Add a dated entry at the top of its Change log, and update "Last updated".
-4. Edit this file only if a rule or the workflow changed. Keep it under ~40 lines.
+4. Edit this file only if a rule or the workflow changed. Keep it under ~50 lines.
 
 Writing style for `PROJECT_CONTEXT.md`: plain full sentences, explain a term the first time it
 appears, no symbol shorthand, dates as YYYY-MM-DD. Once the Change log has more than ~15
