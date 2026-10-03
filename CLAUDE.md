@@ -15,6 +15,14 @@ what exists, decisions, and history, lives in `PROJECT_CONTEXT.md`.
   work there, so latency numbers from the Mac don't count.
 - Benchmarks run on Linux only.
 
+## Keep it simple (top priority)
+- Choose the simplest approach that works, not the most complete one. Add new logic where
+  the data already is (e.g. inside an existing function), not as a new layer on top.
+- Don't handle edge cases this repo won't realistically hit. If a shortcut depends on an
+  assumption, state the assumption in a one-line comment.
+- Fewer functions, flags, and code paths. Reuse what exists before adding something new.
+- If something more complex really is needed, explain why and ask before building it.
+
 ## Rules
 - Benchmark load commands stay byte-identical across runs, so before/after comparisons stay valid.
 - Every benchmark result keeps its metadata (kernel, CPU governor, power source, commit,
@@ -41,7 +49,7 @@ Before every commit and at session end:
 2. Rewrite every section of `PROJECT_CONTEXT.md` the change affects so it describes the code
    as it is now. Delete lines that are no longer true.
 3. Add a dated entry at the top of its Change log, and update "Last updated".
-4. Edit this file only if a rule or the workflow changed. Keep it under ~50 lines.
+4. Edit this file only if a rule or the workflow changed. Keep it under ~60 lines.
 
 Writing style for `PROJECT_CONTEXT.md`: plain full sentences, explain a term the first time it
 appears, no symbol shorthand, dates as YYYY-MM-DD. Once the Change log has more than ~15
