@@ -48,7 +48,8 @@ It also puts the control thread on `SCHED_FIFO` priority 50. Both need root on L
 
 ## Where things stand
 The pipeline builds and runs on the Mac and prints its statistics. The cyclictest kernel
-baseline has been run on Linux. `rt_bench.sh --thread` is ready but hasn't run on Linux yet,
+baseline has been run on Linux, but test 08 (interrupt load) changed on 2026-10-02, so the
+baseline needs to be re-run before it can be compared with a `--thread` run. `rt_bench.sh --thread` is ready but hasn't run on Linux yet,
 so there are no real numbers for this program so far.
 
 **Comparing the two runs.** cyclictest's latency is how late it woke up after its 1 ms timer,
@@ -71,6 +72,10 @@ busy-waits. Both still preempt `stress-ng`, which runs at normal priority.
   written to `metadata.txt`, so a stale or debug build can't sneak into a benchmark.
 - **2026-09-30: the benchmark stops the program with SIGINT** (`timeout -s INT`). That uses the
   program's normal Ctrl-C shutdown, so it prints its statistics into the log.
+- **2026-10-02: test 08 runs every interrupt stressor at once** (`--class interrupt --all 1`).
+  The old `--sequential` (with no number) most likely made stress-ng exit straight away, leaving
+  no load. Even with a number, it would run the stressors one after another, each for the full
+  2 minutes, so the measurement would only cover the first one.
 
 ## Open questions / known issues
 - **The log can lose data.** `log_ring` keeps only the latest value, so if the log thread falls
@@ -82,16 +87,19 @@ busy-waits. Both still preempt `stress-ng`, which runs at normal priority.
   `read()` uses the default (strongest) memory ordering. Is acquire enough?
 - `<atomic>` isn't included directly. The code only compiles because another header pulls it in.
 - The log thread busy-waits, which burns a whole CPU core.
-- **Test 08 may run with no load.** In `rt_bench.sh`, `--sequential` normally needs a number
-  after it. If stress-ng rejects the line, test 08 measures an idle machine. Check the terminal
-  output. Fixing it means re-running the cyclictest baseline too, so both runs use the same load.
 
 ## What's next
 1. Design and build an SPSC queue for `log_ring`, so no samples are lost.
-2. On Linux, run `./rt_bench.sh --thread`. Check each log for "SCHED_FIFO priority 50 applied"
+2. On Linux, re-run `./rt_bench.sh` for a fresh cyclictest baseline (test 08 changed), then run
+   `./rt_bench.sh --thread`. Check each log for "SCHED_FIFO priority 50 applied"
    to confirm RT mode was active, then compare `jitter` against the cyclictest baseline.
 
 ## Change log
+### 2026-10-02: Fixed the test 08 load in rt_bench.sh
+Replaced `--sequential` with `--all 1`, so test 08 actually loads the machine with every
+interrupt-class stressor for its 2 minutes. Earlier cyclictest baselines aren't comparable for
+test 08 and should be re-run.
+
 ### 2026-10-02: Explained rt_bench.sh for beginners
 Added comments on the edge cases throughout `rt_bench.sh`, plus a plain-English walkthrough at
 the bottom. Each walkthrough step is numbered and matches a `[STEP N]` marker in the code.

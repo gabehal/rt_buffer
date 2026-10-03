@@ -151,11 +151,12 @@ run_test "04_cpu_only"       "2m" --cpu 4
 run_test "05_io_only"        "2m" --io 2
 run_test "06_vm_only"        "2m" --vm 1 --vm-bytes 256M
 run_test "07_switch_only"    "2m" --switch 4
-# CHECK: stress-ng's --sequential normally expects a number after it (--sequential N).
-# If stress-ng rejects this line, it exits right away and test 08 runs with no load.
-# stress-ng runs in the background, so that error is easy to miss. Look for it in the
-# terminal output. Don't edit the line without re-running the cyclictest baseline too.
-run_test "08_interrupt_only" "2m" --class interrupt --sequential
+# --all 1 = one instance of every interrupt-class stressor, all at the same time, for 2m.
+# Not --sequential: that runs the stressors one after another, each for the full 2m,
+# so the 2-minute measurement would only see the first one. It also needs a number
+# after it. Without one, stress-ng exits immediately and the test runs with no load.
+# (Changed 2026-10-02. Test 08 in older baselines most likely ran with no load.)
+run_test "08_interrupt_only" "2m" --class interrupt --all 1
 
 # ----- [STEP 12] soak test, 45 minutes -----
 # ===== Priority 1: soak, with a histogram for plotting and the SMI/MCE flag on =====
