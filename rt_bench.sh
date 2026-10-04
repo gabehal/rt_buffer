@@ -6,7 +6,12 @@
 #   ./rt_bench.sh            baseline the kernel with cyclictest
 #   ./rt_bench.sh --thread   build thread.cpp and run it (--rt) in place of cyclictest
 #
-# Every run ends by writing summary.log (p50/p99/max per test) into its results
+# Only one core is measured: RT_CPU (core 6), which should be isolated from the
+# kernel's scheduler (see PROJECT_CONTEXT.md). All stress-ng load runs on the other
+# cores (HOUSEKEEPING_CPUS), so the numbers show how much the rest of the machine
+# leaks into the isolated core.
+#
+# Every run ends by writing summary.log (avg/p99/p99.9/max per test) into its results
 # folder. Compare two runs with: ./summarize.sh <baseline folder> <thread folder>
 #
 # Keep every stress-ng command below byte-for-byte identical between modes,
@@ -32,7 +37,15 @@ case "${1:-}" in
   *)        echo "usage: $0 [--thread]" >&2; exit 1 ;;
 esac
 
-# ----- [STEP 3] find our own folder -----
+# ----- [STEP 3] settings and our own folder -----
+# the one place to change which core is measured, which cores get the load,
+# and the real-time priority used by both cyclictest and the program
+RT_CPU=6
+HOUSEKEEPING_CPUS="0-5,7"
+RT_PRIO=80
+# stress-ng --hdd writes its temporary files here, not into the current directory
+STRESS_TMP="$HOME/stress_tmp"
+
 # the folder this script lives in, as an absolute path, so thread.cpp is found
 # even when the script is started from another directory (e.g. ../rt_prep/rt_bench.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -53,7 +66,7 @@ fi
 # results/ is relative to where you run the script from, not the script's folder
 # the timestamp makes every run a new folder, so old results are never overwritten
 RESULTS_DIR="results/$(date +%Y-%m-%d_%H%M%S)_$MODE"
-mkdir -p "$RESULTS_DIR"
+mkdir -p "$RESULTS_DIR" "$STRESS_TMP"
 
 # ----- [STEP 6] write metadata.txt and start summary.log -----
 # --- metadata: always capture this next to the numbers, or they're meaningless later ---
@@ -76,10 +89,16 @@ mkdir -p "$RESULTS_DIR"
     echo "build flags: $BUILD_FLAGS"
     echo "compiler: $(g++ --version | head -1)"
   fi
+  echo "rt cpu: $RT_CPU | priority: $RT_PRIO | load cpus: $HOUSEKEEPING_CPUS"
+  # what the kernel actually isolated, and core 6's hyperthread sibling (if one is listed
+  # besides RT_CPU, load running on that sibling shares core 6's hardware)
+  echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo unknown)"
+  echo "rt cpu siblings (SMT): $(cat /sys/devices/system/cpu/cpu$RT_CPU/topology/thread_siblings_list 2>/dev/null || echo unknown)"
+  echo "kernel cmdline: $(cat /proc/cmdline 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/metadata.txt"
 
 # summary.log gets its header now. run_test() appends one row per test later.
-ROW_FMT="%-24s %10s %10s %10s   %s\n"
+ROW_FMT="%-20s %10s %10s %10s %10s   %s\n"
 {
   echo "rt_bench summary: $RESULTS_DIR"
   if [ "$MODE" = "thread" ]; then
@@ -87,15 +106,22 @@ ROW_FMT="%-24s %10s %10s %10s   %s\n"
   else
     echo "mode: cyclictest | commit: $(git rev-parse --short HEAD 2>/dev/null)"
   fi
+  echo "measured: cpu $RT_CPU at priority $RT_PRIO | load on cpus $HOUSEKEEPING_CPUS"
   echo "latency = how late the 1 ms wake-up was, in microseconds (us)"
   echo
   # shellcheck disable=SC2059  # ROW_FMT is our own fixed format string
-  printf "$ROW_FMT" "test" "p50" "p99" "max" "notes"
+  printf "$ROW_FMT" "test" "avg" "p99" "p99.9" "max" "notes"
 } > "$RESULTS_DIR/summary.log"
 
 echo "Logging to $RESULTS_DIR"
 
-# ----- [STEP 7] warn if on battery -----
+# ----- [STEP 7] warn if on battery or no core is isolated -----
+# without isolation the kernel can put other work on core 6, so the numbers
+# don't mean what this script assumes. Warn, but still run.
+if [ -z "$(cat /sys/devices/system/cpu/isolated 2>/dev/null)" ]; then
+  echo "WARNING: no isolated cores. Boot with isolcpus=$RT_CPU (see PROJECT_CONTEXT.md)."
+fi
+
 # on battery, the governor throttles for power savings, not accuracy
 # the "online" file contains 1 when plugged in and 0 on battery. With no AC
 # file at all (a desktop), grep fails quietly and no warning is printed.
@@ -128,57 +154,69 @@ measure () {
     # timeout exits with code 124 when time runs out. That's expected here, not an error.
     # timeout only sends SIGINT. If the program ever stops handling SIGINT, this line
     # waits forever. (timeout -k 10s would force-kill it 10s later.)
-    sudo timeout -s INT "$duration" "$THREAD_BIN" --rt > "$RESULTS_DIR/$name.log" 2>&1
+    # --cpu tells the program which core to pin its control thread to
+    sudo timeout -s INT "$duration" "$THREAD_BIN" --rt --cpu "$RT_CPU" > "$RESULTS_DIR/$name.log" 2>&1
   else
-    # -m lock memory, -S one thread per CPU, -p99 priority 99, -i1000 wake every
-    # 1000 us (1 ms, same period as the control loop), -d0 same interval on every thread
+    # -m lock memory, -p priority (same as the program's), -i1000 wake every 1000 us
+    # (1 ms, same period as the control loop), -a pin to RT_CPU, -t1 just one thread
     # -q: no live status lines, only the final result (otherwise the log fills with updates)
-    # -H400: histogram of 1 us buckets from 0 to 399 us, plus an all-CPUs column.
-    #        summary_row() works out p50/p99 from it. Anything 400 us or more is only counted
-    #        on the "# Histogram Overflows:" line.
-    sudo cyclictest -m -Sp99 -i1000 -d0 -q -H400 -D "$duration" > "$RESULTS_DIR/$name.log"
+    # -h400: histogram of 1 us buckets from 0 to 399 us. summary_row() works out p99/p99.9
+    #        from it. Anything 400 us or more is only counted on "# Histogram Overflows:".
+    sudo cyclictest -m -p"$RT_PRIO" -i1000 -a"$RT_CPU" -t1 -q -h400 -D "$duration" > "$RESULTS_DIR/$name.log"
   fi
 }
 
 # ----- [STEP 10] define summary_row() and run_test() -----
-# append one row to summary.log for a test that just finished: p50, p99, max (us)
+# append one row to summary.log for a test that just finished: avg, p99, p99.9, max (us)
 summary_row () {
   local name="$1" log="$RESULTS_DIR/$1.log" nums="" note=""
   if [ ! -s "$log" ]; then
     # -s: exists and isn't empty (a crashed test can leave an empty log)
     note="log missing or empty"
   elif [ "$MODE" = "thread" ]; then
-    # read from the program's own line: jitter: n=2976 min=9 p50=203 p99=534 max=10210 (us)
-    nums="$(awk '/^jitter: n=/ { for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
-                                 print v["p50"], v["p99"], v["max"] }' "$log")"
-    if grep -q "SCHED_FIFO priority 50 applied" "$log"; then note="RT ok"; else note="RT FAILED"; fi
+    # read from the program's own line, any order of keys:
+    #   jitter: n=120000 min=9 avg=12 p50=11 p99=30 p99.9=45 max=80 (us)
+    # a key the program doesn't print yet shows up as n/a
+    nums="$(awk '
+      function get(k) { return (k in v) ? v[k] : "n/a" }
+      /^jitter: n=/ { for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+                      print get("avg"), get("p99"), get("p99.9"), get("max") }' "$log")"
+    # RT only counts if the priority AND the pinning to the isolated core both worked
+    if grep -q "SCHED_FIFO priority $RT_PRIO applied" "$log" && grep -q "pinned to CPU $RT_CPU" "$log"; then
+      note="RT ok"
+    else
+      note="RT FAILED"
+    fi
   else
-    # cyclictest only reports min/avg/max, so p50/p99 come from the -H400 histogram:
-    #   000003 001200<TAB>001150<TAB>002350    bucket (us), one count per CPU, all CPUs
-    # assumes 2+ CPUs: only then does cyclictest add the all-CPUs column, and the overall
-    # value at the end of the "Max Latencies" and "Histogram Overflows" lines.
+    # cyclictest reports avg and max itself, p99/p99.9 come from the -h400 histogram:
+    #   000003 001200        bucket (us), how many wake-ups were that late
+    #   # Avg Latencies: 00004
+    #   # Max Latencies: 00045
+    #   # Histogram Overflows: 00001
+    # one thread (-t1), so each line has a single value and $NF is it.
     # Samples of 400 us or more aren't in any bucket, only in the overflow count. They still
-    # go into the total, or p99 would look better than it is.
+    # go into the total, or the tail would look better than it is.
     nums="$(awk '
       /^[0-9][0-9][0-9][0-9][0-9][0-9] / { n++; count[n] = $NF; total += $NF }
       /^# Histogram Overflows:/ { total += $NF }
+      /^# Avg Latencies:/ { avg = $NF + 0 }
       /^# Max Latencies:/ { max = $NF + 0 }
       END {
-        p50 = ">=400"; p99 = ">=400"     # stays that way if the point is in the overflow
+        p99 = ">=400"; p999 = ">=400"     # stays that way if the point is in the overflow
         for (b = 1; b <= n; b++) {
           cum += count[b]
-          if (p50 == ">=400" && cum >= 0.50 * total) p50 = b - 1   # bucket b holds (b-1) us
-          if (p99 == ">=400" && cum >= 0.99 * total) p99 = b - 1
+          if (p99  == ">=400" && cum >= 0.99  * total) p99  = b - 1   # bucket b holds (b-1) us
+          if (p999 == ">=400" && cum >= 0.999 * total) p999 = b - 1
         }
-        print p50, p99, max
+        print avg, p99, p999, max
       }' "$log")"
   fi
   # no numbers found (missing log, or the program printed "jitter is empty")
-  [ -z "$nums" ] && nums="n/a n/a n/a"
-  # shellcheck disable=SC2086  # split "p50 p99 max" into $1 $2 $3 on purpose
+  [ -z "$nums" ] && nums="n/a n/a n/a n/a"
+  # shellcheck disable=SC2086  # split "avg p99 p99.9 max" into $1..$4 on purpose
   set -- $nums
   # shellcheck disable=SC2059
-  printf "$ROW_FMT" "$name" "$1 us" "$2 us" "$3 us" "$note" >> "$RESULTS_DIR/summary.log"
+  printf "$ROW_FMT" "$name" "$1 us" "$2 us" "$3 us" "$4 us" "$note" >> "$RESULTS_DIR/summary.log"
 }
 
 run_test () {
@@ -188,8 +226,9 @@ run_test () {
   echo ">>> $name"
   # no extra args means "no load" (the idle baseline), so don't start stress-ng at all
   if [ "$#" -gt 0 ]; then
-    # & runs the load in the background, so the measurement can run at the same time
-    stress-ng -t "$duration" "$@" &
+    # & runs the load in the background, so the measurement can run at the same time.
+    # taskset keeps every stress-ng worker off the measured core.
+    taskset -c "$HOUSEKEEPING_CPUS" stress-ng -t "$duration" --temp-path "$STRESS_TMP" "$@" &
     pid=$!
   fi
   measure "$name" "$duration"
@@ -202,33 +241,31 @@ run_test () {
 }
 
 # ----- [STEP 11] run the tests, 2 minutes each -----
-# ===== Priority 1: always run these =====
-run_test "01_idle_baseline"      "2m"
-run_test "02_combined_realistic" "2m" --cpu 4 --io 2 --vm 1 --vm-bytes 256M
-run_test "03_combined_oversub"   "2m" --cpu 16 --io 2 --vm 1 --vm-bytes 256M
-
-# ===== Priority 2: isolate each subsystem, run when you need to know which one dominates =====
-run_test "04_cpu_only"       "2m" --cpu 4
-run_test "05_io_only"        "2m" --io 2
-run_test "06_vm_only"        "2m" --vm 1 --vm-bytes 256M
-run_test "07_switch_only"    "2m" --switch 4
-# --all 1 = one instance of every interrupt-class stressor, all at the same time, for 2m.
-# Not --sequential: that runs the stressors one after another, each for the full 2m,
-# so the 2-minute measurement would only see the first one. It also needs a number
-# after it. Without one, stress-ng exits immediately and the test runs with no load.
-# (Changed 2026-10-02. Test 08 in older baselines most likely ran with no load.)
-run_test "08_interrupt_only" "2m" --class interrupt --all 1
+run_test "01_idle"           "2m"
+# context switches and pipe syscalls: scheduler and IPI traffic in the kernel
+run_test "02_kernel_work"    "2m" --switch 4 --pipe 2
+# disk writes: block layer work and disk interrupts
+run_test "03_disk_io"        "2m" --hdd 2
+# memory bandwidth (STREAM) on all 7 load cores: fights core 6 for the shared
+# L3 cache and memory bus, the main way other cores still reach an isolated core
+run_test "04_memory"         "2m" --stream 7
+# a bit of everything, roughly what the rest of a robot computer does
+run_test "05_combined_robot" "2m" --cpu 2 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%
 
 # ----- [STEP 12] soak test, 45 minutes -----
-# ===== Priority 1: soak, with the SMI/MCE flag on =====
-# the realistic load plus --interrupts, which makes stress-ng report interrupt counts
-run_test "09_soak_45min" "45m" --cpu 4 --io 2 --vm 1 --vm-bytes 256M --interrupts
+# the combined load with --cpu 7, so every load core is busy: a deliberate worst case.
+# Rare spikes only show up over long runs.
+run_test "06_soak_45min"     "45m" --cpu 7 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%
 
 # ----- [STEP 13] hardware check, 5 minutes, no load -----
-# ===== hwlatdetect: hardware/firmware latency, independent of any load, run it alone =====
+# hwlatdetect: hardware/firmware stalls (e.g. SMIs), independent of any load, run it alone.
+# It measures the machine, not the loop, so its result goes under the table, not in it.
 # full path because /usr/sbin often isn't on a normal user's PATH
-echo ">>> 10_hwlatdetect"
-sudo /usr/sbin/hwlatdetect --duration=5m > "$RESULTS_DIR/10_hwlatdetect.log"
+echo ">>> 07_hwlatdetect"
+sudo /usr/sbin/hwlatdetect --duration=5m > "$RESULTS_DIR/07_hwlatdetect.log"
+# the "Max Latency:" line holds a value like "12us", or "Below threshold"
+gap="$(awk -F': ' '/^Max Latency:/ { print $2 }' "$RESULTS_DIR/07_hwlatdetect.log")"
+printf "\nhwlatdetect worst gap (machine only, not compared): %s\n" "${gap:-n/a}" >> "$RESULTS_DIR/summary.log"
 
 # ----- [STEP 14] show summary.log, print where the results are, and exit -----
 cat "$RESULTS_DIR/summary.log"
@@ -241,10 +278,10 @@ echo "Done. Results in $RESULTS_DIR"
 # Search the file for "[STEP 9]" to jump straight to that part of the code.
 #
 # GOAL
-#   Measure how late a 1 ms real-time loop wakes up while the machine is under
-#   different kinds of load. Run it once with cyclictest (the kernel on its own)
-#   and once with our program (--thread). The difference between the two runs
-#   is the cost our code adds.
+#   Measure how late a 1 ms real-time loop on the isolated core 6 wakes up while
+#   the other cores are under different kinds of load. Run it once with cyclictest
+#   (the kernel on its own) and once with our program (--thread). The difference
+#   between the two runs is the cost our code adds.
 #
 # [STEP 1] SAFETY SETTINGS
 #      treat unset variables as errors           (catches typos)
@@ -257,7 +294,9 @@ echo "Done. Results in $RESULTS_DIR"
 #      anything else           -> print usage, quit
 #                                 (this happens before any sudo prompt or folder creation)
 #
-# [STEP 3] FIND OUR OWN FOLDER
+# [STEP 3] SETTINGS AND OUR OWN FOLDER
+#      measured core = 6, load cores = 0-5,7, real-time priority = 80
+#      stress-ng temp folder = ~/stress_tmp
 #      script_dir = absolute path of the folder this script is in
 #      (so thread.cpp is found no matter which directory you run it from)
 #
@@ -267,7 +306,7 @@ echo "Done. Results in $RESULTS_DIR"
 #      (always building here means the results never come from a stale or debug binary)
 #
 # [STEP 5] MAKE A RESULTS FOLDER
-#      folder = results/<date_time>_<mode>
+#      folder = results/<date_time>_<mode>   (and make sure ~/stress_tmp exists)
 #      (a new folder every run, so nothing is overwritten,
 #       and the name tells you which mode produced it)
 #
@@ -277,11 +316,15 @@ echo "Done. Results in $RESULTS_DIR"
 #      plugged in or not   (or "unknown")
 #      git commit          (only if we're inside a git repo)
 #      build flags + compiler version (thread mode only)
+#      measured core, priority, load cores
+#      which cores the kernel isolated, core 6's hyperthread sibling, boot options
 #      (numbers without this context can't be compared later)
-#      summary.log: header (folder, mode, commit, build) and column titles.
+#      summary.log: header (folder, mode, commit, build, core) and column titles.
 #      The rows get added by run_test, one per test.
 #
-# [STEP 7] WARN IF ON BATTERY
+# [STEP 7] WARN IF NO CORE IS ISOLATED, OR ON BATTERY
+#      if the kernel isolated no cores -> print a warning, but keep going
+#      (without isolation the kernel can schedule other work on core 6)
 #      if the power adapter reports 0 -> print a warning, but keep going
 #      (battery mode slows the CPU down to save power, which skews timing)
 #
@@ -295,53 +338,57 @@ echo "Done. Results in $RESULTS_DIR"
 #
 # [STEP 9] DEFINE measure(name, duration)
 #      if mode is thread:
-#          run ./thread --rt as root
+#          run ./thread --rt --cpu 6 as root   (it pins its control thread to core 6)
 #          after <duration>, send it Ctrl-C (SIGINT)
 #          -> it shuts down normally and prints its stats
 #          save its normal output AND its error output to <name>.log
 #          (the error output says whether real-time mode actually took effect)
 #      else:
-#          run cyclictest as root: 1 ms period, priority 99, one thread per CPU,
-#          memory locked, quiet, with a histogram up to 400 us, for <duration>
+#          run cyclictest as root: 1 ms period, priority 80, ONE thread pinned to
+#          core 6, memory locked, quiet, with a histogram up to 400 us, for <duration>
 #          save its output to <name>.log
-#          (the histogram is what lets summary_row work out p50 and p99)
+#          (the histogram is what lets summary_row work out p99 and p99.9)
 #
 # [STEP 10] DEFINE summary_row(name) AND run_test(name, duration, load options...)
 #      summary_row: read the test's log, append one row to summary.log
 #          log missing or empty -> n/a
-#          thread mode     -> p50 / p99 / max from the program's "jitter:" line,
-#                             note "RT ok" if SCHED_FIFO was applied, else "RT FAILED"
-#          cyclictest mode -> from the histogram's all-CPUs column:
+#          thread mode     -> avg / p99 / p99.9 / max from the program's "jitter:" line
+#                             (any value it doesn't print -> n/a)
+#                             note "RT ok" only if priority 80 was applied AND the
+#                             control thread was pinned to core 6, else "RT FAILED"
+#          cyclictest mode -> avg and max from its own summary lines
+#                             p99 / p99.9 from the histogram:
 #                             total = all bucket counts + overflows (400 us or more)
 #                             walk the buckets from 0 us upward, adding up counts
-#                             p50 / p99 = first bucket where the sum reaches 50% / 99%
+#                             p99 / p99.9 = first bucket where the sum reaches 99% / 99.9%
 #                             never reached -> ">=400" (it's in the overflow)
-#                             max = the overall value on the "Max Latencies" line
 #      run_test:
 #      print the test name
 #      if load options were given:
-#          start stress-ng with those options in the background, for <duration>
+#          start stress-ng with those options in the background, for <duration>,
+#          on the load cores only (never core 6)
 #      measure(name, duration)                  (runs at the same time as the load)
 #      if a load was started: wait for it to finish
 #          (so it doesn't leak into the next test)
 #      summary_row(name)                        (one row per test, written as it finishes)
 #
 # [STEP 11] RUN THE TESTS, 2 minutes each
-#      01 idle            no load at all            -> best case
-#      02 realistic       CPU + disk + memory load
-#      03 oversubscribed  far more CPU load than there are cores -> worst case
-#      04-08              one kind of load at a time (CPU, disk, memory,
-#                         context switches, interrupts)
-#                         -> tells you which kind of load hurts the most
+#      01 idle            no load at all                   -> best case
+#      02 kernel work     context switches + pipes         -> scheduler / IPI traffic
+#      03 disk I/O        disk writes                      -> block layer + disk interrupts
+#      04 memory          memory bandwidth on 7 cores      -> shared cache / memory bus
+#      05 combined robot  a bit of everything              -> roughly a real robot computer
 #
 # [STEP 12] SOAK TEST, 45 minutes
-#      run_test with the realistic load plus interrupt counting, for 45 minutes
+#      run_test with the combined load, but every load core busy, for 45 minutes
 #      (rare spikes only show up over long runs. The worst case is what matters.)
 #
 # [STEP 13] HARDWARE CHECK, 5 minutes, no load
 #      run hwlatdetect as root
 #      (finds stalls caused by the hardware or firmware itself, e.g. SMIs.
 #       If these are big, no software change can fix them.)
+#      add its worst gap as one line UNDER the summary table
+#      (it measures the machine, not the loop, so it isn't compared)
 #
 # [STEP 14] SHOW summary.log, PRINT where the results are, and exit
 #      (the exit triggers the cleanup from [STEP 8], which stops the sudo loop)

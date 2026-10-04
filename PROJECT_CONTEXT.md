@@ -1,6 +1,6 @@
 # Project Context
 
-Last updated: 2026-10-02
+Last updated: 2026-10-03
 
 ## What this project is
 A hands-on way to learn real-time programming in C++. The goal is a control loop that runs
@@ -28,16 +28,17 @@ The program measures three numbers, all in microseconds:
 
 ## Files
 - `thread.cpp`: the whole program, with the threads, the ring buffer, and the statistics.
-- `rt_bench.sh`: a Linux benchmark battery with two modes. By default it runs `cyclictest`
-  (a standard latency tester) to measure the kernel on its own. With `--thread` it builds
-  `thread.cpp` with `-O2` and runs it with `--rt` instead. Both modes use the same `stress-ng`
-  loads, then a 45-minute soak test and a hardware latency check (`hwlatdetect`). The results
-  go to `results/<timestamp>_cyclictest/` or `results/<timestamp>_thread/`. Each test adds one
-  row to `summary.log` there as it finishes: p50, p99 and max latency in microseconds, plus
-  "RT ok" or "RT FAILED" in thread mode. The bottom of the file has a plain-English
-  walkthrough for readers new to bash.
+- `rt_bench.sh`: a Linux benchmark battery with two modes. It measures only the isolated
+  core 6 and runs all load on cores 0-5 and 7. By default it runs `cyclictest` (a standard
+  latency tester) to measure the kernel on its own. With `--thread` it builds `thread.cpp` with
+  `-O2` and runs it with `--rt --cpu 6` instead. Both modes use the same `stress-ng` loads (see
+  "The tests" below). The results go to `results/<timestamp>_cyclictest/` or
+  `results/<timestamp>_thread/`. Each test adds one row to `summary.log` there as it finishes,
+  with avg, p99, p99.9 and max latency in microseconds, plus "RT ok" or "RT FAILED" in thread
+  mode. The hwlatdetect result goes on a line under the table. The bottom of the file has a
+  plain-English walkthrough for readers new to bash.
 - `summarize.sh`: takes two results folders and prints their `summary.log` tables side by
-  side, with the difference for p99 and max. It only reads summaries and never the raw logs.
+  side, with the difference for p99.9 and max. It only reads summaries and never the raw logs.
 - `.gitignore`: keeps the compiled `thread` binary out of git. Rebuild it locally from source.
 
 ## How to build and run
@@ -49,24 +50,57 @@ The program measures three numbers, all in microseconds:
     ./summarize.sh results/<baseline folder> results/<thread folder>   # side-by-side comparison
 
 `--rt` locks all memory in RAM (`mlockall`), so the loop never stalls on a page fault.
-It also puts the control thread on `SCHED_FIFO` priority 50. Both need root on Linux.
+It also puts the control thread on `SCHED_FIFO` priority 50. Both need root on Linux. The
+planned changes to priority 80 and `--cpu` are listed under "What's next".
+
+**Isolating core 6 (one-time setup on the Linux machine).** Add these to the kernel boot
+command line, e.g. in `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run `update-grub` and
+reboot:
+
+    isolcpus=6 nohz_full=6 rcu_nocbs=6 irqaffinity=0-5,7
+
+They keep the scheduler, the timer tick, RCU callbacks, and device interrupts off core 6.
+Then check `cat /sys/devices/system/cpu/cpu6/topology/thread_siblings_list`. If it lists
+another CPU besides 6, that CPU is core 6's hyperthread twin and shares its hardware. Isolate
+it too, or turn SMT off. `rt_bench.sh` records both in `metadata.txt` and warns if no core is
+isolated.
+
+## The tests
+All load runs on cores 0-5 and 7. Only core 6 is measured.
+
+| # | Test | stress-ng load | Time | What it stresses |
+|---|---|---|---|---|
+| 01 | idle | none | 2 min | nothing, the best case |
+| 02 | kernel_work | `--switch 4 --pipe 2` | 2 min | scheduler and cross-core interrupts (IPIs) |
+| 03 | disk_io | `--hdd 2` | 2 min | block layer and disk interrupts |
+| 04 | memory | `--stream 7` | 2 min | shared L3 cache and memory bandwidth |
+| 05 | combined_robot | `--cpu 2 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%` | 2 min | roughly a real robot computer |
+| 06 | soak_45min | `--cpu 7 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%` | 45 min | every load core busy, rare spikes |
+| 07 | hwlatdetect | none, runs alone | 5 min | stalls from the hardware or firmware (machine only, not compared) |
+
+Disk tests write their temporary files to `~/stress_tmp`.
 
 ## Where things stand
-The pipeline builds and runs on the Mac and prints its statistics. The cyclictest kernel
-baseline has been run on Linux, but test 08 (interrupt load) changed on 2026-10-02, so the
-baseline needs to be re-run before it can be compared with a `--thread` run. cyclictest's flags
-also changed on 2026-10-02 (`-q -H400`), and old runs have no `summary.log`, which is another
-reason to re-run. `rt_bench.sh --thread` is ready but hasn't run on Linux yet, so there are no
-real numbers for this program so far. The summary parsing was tested on the Mac with real
-`thread` output and hand-made cyclictest logs in the format from cyclictest's source code. It
-hasn't been checked against real cyclictest output yet.
+The pipeline builds and runs on the Mac and prints its statistics. On 2026-10-03 the test list,
+the measured core, the priority, and the metrics all changed, so any earlier cyclictest
+baseline is out of date and needs re-running. `rt_bench.sh` is ready for the new design.
+`thread.cpp` isn't yet: it doesn't pin to core 6, still uses priority 50, and doesn't print
+avg or p99.9. Until it does, thread-mode rows show `n/a` for those and "RT FAILED". The
+summary parsing was tested on the Mac with hand-made logs in the format from cyclictest's
+source code and with sample `thread` output. It hasn't been checked against real cyclictest
+output yet.
 
 **Comparing the two runs.** cyclictest's latency is how late it woke up after its 1 ms timer,
-which is the same idea as this program's `jitter`. Both are in microseconds. The setups aren't
-identical: cyclictest runs one thread per CPU at priority 99, while this program runs one
-control thread at priority 50 next to the vision and log threads, and the log thread
-busy-waits. Both still preempt `stress-ng`, which runs at normal priority. Use `summarize.sh`
-with the baseline folder first and the thread folder second.
+which is the same idea as this program's `jitter`. Both are in microseconds. Both run one
+thread on core 6 at priority 80, so the comparison is fair once `thread.cpp` is updated. Use
+`summarize.sh` with the baseline folder first and the thread folder second.
+
+**What `rt_bench.sh` expects from `thread.cpp`.** It runs `./thread --rt --cpu 6` and reads
+three lines from its output:
+- `SCHED_FIFO priority 80 applied …`
+- `control thread pinned to CPU 6`
+- `jitter: n=… avg=… p99=… p99.9=… max=… (us)`. Keys can be in any order, and extra keys
+  such as `min` and `p50` are fine.
 
 ## Decisions and why
 - **2026-09-26: vision uses a latest-value buffer.** Control only cares about the newest
@@ -82,19 +116,23 @@ with the baseline folder first and the thread folder second.
   written to `metadata.txt`, so a stale or debug build can't sneak into a benchmark.
 - **2026-09-30: the benchmark stops the program with SIGINT** (`timeout -s INT`). That uses the
   program's normal Ctrl-C shutdown, so it prints its statistics into the log.
-- **2026-10-02: test 08 runs every interrupt stressor at once** (`--class interrupt --all 1`).
-  The old `--sequential` (with no number) most likely made stress-ng exit straight away, leaving
-  no load. Even with a number, it would run the stressors one after another, each for the full
-  2 minutes, so the measurement would only cover the first one.
-- **2026-10-02: the summary reports p50, p99 and max latency, in microseconds.** Real-time is
-  judged by the worst case, so max and p99 matter most. p50 shows the typical case. The same
-  three numbers exist in both modes, so they compare directly. hwlatdetect and histogram
-  overflow counts are left out of the summary on purpose.
-- **2026-10-02: cyclictest runs with `-q -H400` on every test.** The histogram is needed to work
-  out p50 and p99 (cyclictest itself only reports min, average and max), and `-q` stops the log
-  from filling with live updates. Samples of 400 us or more are counted in the total, so p99
-  isn't flattered. If p99 falls there, the summary shows `>=400 us`. The parsing assumes 2 or
-  more CPUs, because only then does cyclictest add the all-CPUs column.
+- **2026-10-03: only the isolated core 6 is measured, and all load runs on cores 0-5 and 7.**
+  The RT loop will run alone on core 6, so that's the only core whose latency matters. The
+  numbers show how much the rest of the machine leaks into it.
+- **2026-10-03: cyclictest and the control thread both run at priority 80.** Equal priority
+  makes the comparison fair. 80 is above PREEMPT_RT's interrupt threads (50) and below the
+  kernel's own priority-99 threads.
+- **2026-10-03: the summary reports avg, p99, p99.9 and max, in microseconds.** Real-time is
+  judged by the tail, so p99.9 and max matter most, and `summarize.sh` shows the differences
+  for those two. cyclictest gives avg and max itself. p99 and p99.9 come from its histogram
+  (`-h400`, 1 us buckets). Samples of 400 us or more are counted in the total, so the tail
+  isn't flattered. If a percentile falls there, the summary shows `>=400 us`.
+- **2026-10-03: a dedicated memory test with `--stream 7`.** With an isolated core, shared cache
+  and memory bandwidth are the main ways other cores still interfere. STREAM pushes the
+  memory bus harder than `--vm`. A huge `--vm-bytes` was ruled out because it would push the
+  machine into swapping.
+- **2026-10-03: the soak uses one histogram for the whole 45 minutes**, not latency over time.
+  cyclictest can't produce a time series.
 - **2026-10-02: keep things simple.** The summary code was first written as a separate step
   with helpers for cases this repo won't hit. It was rewritten so `run_test()` adds each row
   directly. `CLAUDE.md` now makes simplicity a top-priority rule.
@@ -111,29 +149,34 @@ with the baseline folder first and the thread folder second.
 - The log thread busy-waits, which burns a whole CPU core.
 
 ## What's next
-1. Design and build an SPSC queue for `log_ring`, so no samples are lost.
-2. On Linux, re-run `./rt_bench.sh` for a fresh cyclictest baseline (test 08 changed), then run
-   `./rt_bench.sh --thread`. Check that the first run's `summary.log` has real numbers rather
+1. Update `thread.cpp` to match the new benchmark (user writes this):
+   - parse `--cpu N` in the argument loop, next to `--rt`;
+   - pin the control thread with `pthread_setaffinity_np` next to `pthread_setschedparam`,
+     print `control thread pinned to CPU N`, and wrap it in `#ifdef __linux__` because the
+     call doesn't exist on the Mac;
+   - change the priority from 50 to 80;
+   - add `avg=` and `p99.9=` to the `jitter:` report line.
+2. Set up core isolation on the Linux machine (see "Isolating core 6") and check for an SMT sibling.
+3. Run `./rt_bench.sh` for a fresh baseline. Check that its `summary.log` has real numbers rather
    than `n/a`, which confirms the parser matches real cyclictest output. Then run
-   `./summarize.sh <baseline folder> <thread folder>` and check every row says "RT ok".
+   `./rt_bench.sh --thread` and `./summarize.sh <baseline folder> <thread folder>`, and check
+   every row says "RT ok".
+4. Design and build an SPSC queue for `log_ring`, so no samples are lost.
 
 ## Change log
-### 2026-10-02: summary.log and summarize.sh
-Each test in `rt_bench.sh` now adds a row to `summary.log` (p50, p99, max latency) as it
-finishes, and `summarize.sh` compares two runs side by side. cyclictest runs with `-q -H400` on
-every test to provide the histogram. The soak test goes through `run_test` with the same
-stress-ng arguments as before. Added the "Keep it simple" rule to `CLAUDE.md`.
+### 2026-10-03: Isolated core 6 and a new test list
+`rt_bench.sh` now measures only core 6, using one pinned cyclictest thread or the program with
+`--cpu 6`, both at priority 80. All stress-ng load is pinned to cores 0-5 and 7, and disk temp
+files go to `~/stress_tmp`. The tests are now idle, kernel work, disk I/O, memory, combined
+robot, a 45-minute soak, and hwlatdetect. The summary columns are avg, p99, p99.9 and max, and
+the hwlatdetect worst gap goes on a line under the table. `metadata.txt` now records the
+isolated CPUs, core 6's SMT siblings, and the kernel boot options.
 
-### 2026-10-02: Fixed the test 08 load in rt_bench.sh
-Replaced `--sequential` with `--all 1`, so test 08 actually loads the machine with every
-interrupt-class stressor for its 2 minutes. Earlier cyclictest baselines aren't comparable for
-test 08 and should be re-run.
-
-### 2026-10-02: Explained rt_bench.sh for beginners
-Added comments on the edge cases throughout `rt_bench.sh`, plus a plain-English walkthrough at
-the bottom. Each walkthrough step is numbered and matches a `[STEP N]` marker in the code.
-No behaviour changed. `CLAUDE.md` now describes this as the standard way to add pseudocode
-to a file.
+### 2026-10-02 (condensed)
+Added `summary.log` (one row per test, written by `run_test`) and `summarize.sh` to compare two
+runs. Fixed test 08's stress-ng arguments (`--sequential` had no number). Added a beginner
+walkthrough with `[STEP N]` markers to `rt_bench.sh`, and two rules to `CLAUDE.md`: the
+pseudocode style and "Keep it simple".
 
 ### September 2026 (condensed)
 - 2026-09-30: `rt_bench.sh --thread` runs the battery with this program instead of cyclictest.
