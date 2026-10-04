@@ -3,16 +3,21 @@
 # Reusable real-time benchmark battery for jitter_lab / cpp-realtime-crash-course.
 #
 # Usage:
-#   ./rt_bench.sh            baseline the kernel with cyclictest
-#   ./rt_bench.sh --thread   build thread.cpp and run it (--rt) in place of cyclictest
+#   ./rt_bench.sh [--thread] [--no-rt] [--quick]
+#   (no flags)   baseline the kernel with cyclictest
+#   --thread     build thread.cpp and run it (--rt --cpu 6) in place of cyclictest
+#   --no-rt      with --thread only: run the program without --rt/--cpu, to see what RT buys you
+#   --quick      skip the 45 min soak and hwlatdetect
 #
 # Only one core is measured: RT_CPU (core 6), which should be isolated from the
 # kernel's scheduler (see PROJECT_CONTEXT.md). All stress-ng load runs on the other
 # cores (HOUSEKEEPING_CPUS), so the numbers show how much the rest of the machine
 # leaks into the isolated core.
 #
-# Every run ends by writing summary.log (avg/p99/p99.9/max per test) into its results
-# folder. Compare two runs with: ./summarize.sh <baseline folder> <thread folder>
+# Each run writes two files into its results folder:
+#   summary.log  run info + one row per test (avg/p99/p99.9/max). This is what you compare:
+#                ./summarize.sh <folder A> <folder B>
+#   raw.log      every tool's raw output, one section per test. Only for debugging.
 #
 # Keep every stress-ng command below byte-for-byte identical between modes,
 # that's what makes the before/after subtraction (kernel-only vs kernel+your
@@ -29,13 +34,21 @@ set -uo pipefail
 
 # ----- [STEP 2] read the command line -----
 MODE="cyclictest"
-# ${1:-} means "the first argument, or empty if there isn't one". Plain $1 would
-# crash under set -u when the script is run with no arguments.
-case "${1:-}" in
-  "")       ;;
-  --thread) MODE="thread" ;;
-  *)        echo "usage: $0 [--thread]" >&2; exit 1 ;;
-esac
+USE_RT="yes"
+QUICK="no"
+# "$@" is every argument, so the flags can come in any order
+for arg in "$@"; do
+  case "$arg" in
+    --thread) MODE="thread" ;;
+    --no-rt)  USE_RT="no" ;;
+    --quick)  QUICK="yes" ;;
+    *)        echo "usage: $0 [--thread] [--no-rt] [--quick]" >&2; exit 1 ;;
+  esac
+done
+# cyclictest is always real-time, so --no-rt only means something for the program
+if [ "$USE_RT" = "no" ] && [ "$MODE" != "thread" ]; then
+  echo "--no-rt only works together with --thread" >&2; exit 1
+fi
 
 # ----- [STEP 3] settings and our own folder -----
 # the one place to change which core is measured, which cores get the load,
@@ -64,15 +77,24 @@ fi
 
 # ----- [STEP 5] make a results folder -----
 # results/ is relative to where you run the script from, not the script's folder
-# the timestamp makes every run a new folder, so old results are never overwritten
+# the timestamp makes every run a new folder, so old results are never overwritten.
+# The name also says how it was run, e.g. results/2026-10-03_101500_thread_quick
 RESULTS_DIR="results/$(date +%Y-%m-%d_%H%M%S)_$MODE"
+[ "$QUICK" = "yes" ] && RESULTS_DIR="${RESULTS_DIR}_quick"
+[ "$USE_RT" = "no" ] && RESULTS_DIR="${RESULTS_DIR}_nort"
 mkdir -p "$RESULTS_DIR" "$STRESS_TMP"
+SUMMARY="$RESULTS_DIR/summary.log"
+# each tool writes here first. summary_row reads it, keep_raw moves it into raw.log.
+CURRENT="$RESULTS_DIR/current_test.log"
 
-# ----- [STEP 6] write metadata.txt and start summary.log -----
-# --- metadata: always capture this next to the numbers, or they're meaningless later ---
-# everything printed inside { ... } goes into the one metadata.txt file
+# ----- [STEP 6] start summary.log: run info, then the column titles -----
+# the run info always sits next to the numbers, or they're meaningless later.
+# run_test() appends one row per test under the column titles.
+ROW_FMT="%-20s %10s %10s %10s %10s   %s\n"
 {
+  echo "rt_bench summary: $RESULTS_DIR"
   echo "mode: $MODE"
+  echo "options: rt=$USE_RT quick=$QUICK"
   echo "date: $(date -Iseconds)"
   echo "kernel: $(uname -a)"
   # these /sys files don't exist on every machine (VMs, desktops, some ARM boards).
@@ -80,11 +102,8 @@ mkdir -p "$RESULTS_DIR" "$STRESS_TMP"
   echo "cpu governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
   # AC* because the adapter's name varies by machine (AC, AC0, ACAD, ...)
   echo "on AC power: $(cat /sys/class/power_supply/AC*/online 2>/dev/null || echo unknown)"
-  # only record the commit if git is installed AND we're inside a repo,
-  # otherwise git would print an error into the metadata
-  if command -v git >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
-    echo "git commit: $(git rev-parse HEAD)"
-  fi
+  # "unknown" if git isn't installed or we're not inside a repo
+  echo "git commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   if [ "$MODE" = "thread" ]; then
     echo "build flags: $BUILD_FLAGS"
     echo "compiler: $(g++ --version | head -1)"
@@ -95,23 +114,11 @@ mkdir -p "$RESULTS_DIR" "$STRESS_TMP"
   echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo unknown)"
   echo "rt cpu siblings (SMT): $(cat /sys/devices/system/cpu/cpu$RT_CPU/topology/thread_siblings_list 2>/dev/null || echo unknown)"
   echo "kernel cmdline: $(cat /proc/cmdline 2>/dev/null || echo unknown)"
-} > "$RESULTS_DIR/metadata.txt"
-
-# summary.log gets its header now. run_test() appends one row per test later.
-ROW_FMT="%-20s %10s %10s %10s %10s   %s\n"
-{
-  echo "rt_bench summary: $RESULTS_DIR"
-  if [ "$MODE" = "thread" ]; then
-    echo "mode: thread | commit: $(git rev-parse --short HEAD 2>/dev/null) | build: $BUILD_FLAGS"
-  else
-    echo "mode: cyclictest | commit: $(git rev-parse --short HEAD 2>/dev/null)"
-  fi
-  echo "measured: cpu $RT_CPU at priority $RT_PRIO | load on cpus $HOUSEKEEPING_CPUS"
-  echo "latency = how late the 1 ms wake-up was, in microseconds (us)"
   echo
+  echo "latency = how late the 1 ms wake-up was, in microseconds (us)"
   # shellcheck disable=SC2059  # ROW_FMT is our own fixed format string
   printf "$ROW_FMT" "test" "avg" "p99" "p99.9" "max" "notes"
-} > "$RESULTS_DIR/summary.log"
+} > "$SUMMARY"
 
 echo "Logging to $RESULTS_DIR"
 
@@ -147,29 +154,34 @@ trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
 # thread mode: SIGINT at the deadline triggers the program's normal shutdown,
 # so its stats land in the log. 2>&1 keeps the mlockall/SCHED_FIFO lines,
 # which show whether RT mode actually took effect.
+# Both modes write to $CURRENT. summary_row reads it right after.
 measure () {
-  local name="$1" duration="$2"
-  if [ "$MODE" = "thread" ]; then
+  local duration="$1"
+  if [ "$MODE" = "thread" ] && [ "$USE_RT" = "no" ]; then
+    # --no-rt: no memory locking, no pinning, no priority. The kernel puts the
+    # threads wherever it likes, which is the point of the comparison.
+    sudo timeout -s INT "$duration" "$THREAD_BIN" > "$CURRENT" 2>&1
+  elif [ "$MODE" = "thread" ]; then
     # timeout has to run under sudo too: a normal user can't signal a root process.
     # timeout exits with code 124 when time runs out. That's expected here, not an error.
     # timeout only sends SIGINT. If the program ever stops handling SIGINT, this line
     # waits forever. (timeout -k 10s would force-kill it 10s later.)
     # --cpu tells the program which core to pin its control thread to
-    sudo timeout -s INT "$duration" "$THREAD_BIN" --rt --cpu "$RT_CPU" > "$RESULTS_DIR/$name.log" 2>&1
+    sudo timeout -s INT "$duration" "$THREAD_BIN" --rt --cpu "$RT_CPU" > "$CURRENT" 2>&1
   else
     # -m lock memory, -p priority (same as the program's), -i1000 wake every 1000 us
     # (1 ms, same period as the control loop), -a pin to RT_CPU, -t1 just one thread
     # -q: no live status lines, only the final result (otherwise the log fills with updates)
     # -h400: histogram of 1 us buckets from 0 to 399 us. summary_row() works out p99/p99.9
     #        from it. Anything 400 us or more is only counted on "# Histogram Overflows:".
-    sudo cyclictest -m -p"$RT_PRIO" -i1000 -a"$RT_CPU" -t1 -q -h400 -D "$duration" > "$RESULTS_DIR/$name.log"
+    sudo cyclictest -m -p"$RT_PRIO" -i1000 -a"$RT_CPU" -t1 -q -h400 -D "$duration" > "$CURRENT"
   fi
 }
 
-# ----- [STEP 10] define summary_row() and run_test() -----
+# ----- [STEP 10] define summary_row(), keep_raw() and run_test() -----
 # append one row to summary.log for a test that just finished: avg, p99, p99.9, max (us)
 summary_row () {
-  local name="$1" log="$RESULTS_DIR/$1.log" nums="" note=""
+  local name="$1" log="$CURRENT" nums="" note=""
   if [ ! -s "$log" ]; then
     # -s: exists and isn't empty (a crashed test can leave an empty log)
     note="log missing or empty"
@@ -182,7 +194,9 @@ summary_row () {
       /^jitter: n=/ { for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
                       print get("avg"), get("p99"), get("p99.9"), get("max") }' "$log")"
     # RT only counts if the priority AND the pinning to the isolated core both worked
-    if grep -q "SCHED_FIFO priority $RT_PRIO applied" "$log" && grep -q "pinned to CPU $RT_CPU" "$log"; then
+    if [ "$USE_RT" = "no" ]; then
+      note="RT off"
+    elif grep -q "SCHED_FIFO priority $RT_PRIO applied" "$log" && grep -q "pinned to CPU $RT_CPU" "$log"; then
       note="RT ok"
     else
       note="RT FAILED"
@@ -216,7 +230,14 @@ summary_row () {
   # shellcheck disable=SC2086  # split "avg p99 p99.9 max" into $1..$4 on purpose
   set -- $nums
   # shellcheck disable=SC2059
-  printf "$ROW_FMT" "$name" "$1 us" "$2 us" "$3 us" "$4 us" "$note" >> "$RESULTS_DIR/summary.log"
+  printf "$ROW_FMT" "$name" "$1 us" "$2 us" "$3 us" "$4 us" "$note" >> "$SUMMARY"
+}
+
+# move the test's raw output into raw.log under a header, so the folder only ever
+# holds summary.log and raw.log. "|| true" because a crashed tool may leave no file.
+keep_raw () {
+  { echo "===== $1 ====="; cat "$CURRENT" 2>/dev/null || true; echo; } >> "$RESULTS_DIR/raw.log"
+  rm -f "$CURRENT"
 }
 
 run_test () {
@@ -231,13 +252,14 @@ run_test () {
     taskset -c "$HOUSEKEEPING_CPUS" stress-ng -t "$duration" --temp-path "$STRESS_TMP" "$@" &
     pid=$!
   fi
-  measure "$name" "$duration"
+  measure "$duration"
   # wait for the load to exit, so it can't spill into the next test.
   # the -n check skips this for the idle test: there's no load to wait for, and
   # wait "" would print an error. Don't change it to a bare "wait": that waits for
   # every background job, including the sudo keep-alive loop, which never ends.
   [ -n "$pid" ] && wait "$pid" 2>/dev/null
   summary_row "$name"
+  keep_raw "$name"
 }
 
 # ----- [STEP 11] run the tests, 2 minutes each -----
@@ -252,23 +274,28 @@ run_test "04_memory"         "2m" --stream 7
 # a bit of everything, roughly what the rest of a robot computer does
 run_test "05_combined_robot" "2m" --cpu 2 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%
 
-# ----- [STEP 12] soak test, 45 minutes -----
+# ----- [STEP 12] soak test, 45 minutes (skipped with --quick) -----
 # the combined load with --cpu 7, so every load core is busy: a deliberate worst case.
 # Rare spikes only show up over long runs.
-run_test "06_soak_45min"     "45m" --cpu 7 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%
+if [ "$QUICK" = "no" ]; then
+  run_test "06_soak_45min"     "45m" --cpu 7 --hdd 1 --switch 2 --vm 1 --vm-bytes 25%
+fi
 
-# ----- [STEP 13] hardware check, 5 minutes, no load -----
+# ----- [STEP 13] hardware check, 5 minutes, no load (skipped with --quick) -----
 # hwlatdetect: hardware/firmware stalls (e.g. SMIs), independent of any load, run it alone.
 # It measures the machine, not the loop, so its result goes under the table, not in it.
 # full path because /usr/sbin often isn't on a normal user's PATH
-echo ">>> 07_hwlatdetect"
-sudo /usr/sbin/hwlatdetect --duration=5m > "$RESULTS_DIR/07_hwlatdetect.log"
-# the "Max Latency:" line holds a value like "12us", or "Below threshold"
-gap="$(awk -F': ' '/^Max Latency:/ { print $2 }' "$RESULTS_DIR/07_hwlatdetect.log")"
-printf "\nhwlatdetect worst gap (machine only, not compared): %s\n" "${gap:-n/a}" >> "$RESULTS_DIR/summary.log"
+if [ "$QUICK" = "no" ]; then
+  echo ">>> 07_hwlatdetect"
+  sudo /usr/sbin/hwlatdetect --duration=5m > "$CURRENT"
+  # the "Max Latency:" line holds a value like "12us", or "Below threshold"
+  gap="$(awk -F': ' '/^Max Latency:/ { print $2 }' "$CURRENT")"
+  printf "\nhwlatdetect worst gap (machine only, not compared): %s\n" "${gap:-n/a}" >> "$SUMMARY"
+  keep_raw "07_hwlatdetect"
+fi
 
 # ----- [STEP 14] show summary.log, print where the results are, and exit -----
-cat "$RESULTS_DIR/summary.log"
+cat "$SUMMARY"
 echo "Done. Results in $RESULTS_DIR"
 
 # =============================================================================
@@ -289,10 +316,14 @@ echo "Done. Results in $RESULTS_DIR"
 #      do NOT stop on errors                     (one bad test shouldn't kill a 1-hour run)
 #
 # [STEP 2] READ THE COMMAND LINE
-#      if no argument          -> mode = cyclictest
-#      if argument is --thread -> mode = thread
-#      anything else           -> print usage, quit
-#                                 (this happens before any sudo prompt or folder creation)
+#      start with: mode = cyclictest, rt = yes, quick = no
+#      for each argument, in any order:
+#          --thread -> mode = thread
+#          --no-rt  -> rt = no
+#          --quick  -> quick = yes
+#          anything else -> print usage, quit
+#      --no-rt without --thread -> print an error, quit   (cyclictest is always real-time)
+#      (all of this happens before any sudo prompt or folder creation)
 #
 # [STEP 3] SETTINGS AND OUR OWN FOLDER
 #      measured core = 6, load cores = 0-5,7, real-time priority = 80
@@ -306,21 +337,22 @@ echo "Done. Results in $RESULTS_DIR"
 #      (always building here means the results never come from a stale or debug binary)
 #
 # [STEP 5] MAKE A RESULTS FOLDER
-#      folder = results/<date_time>_<mode>   (and make sure ~/stress_tmp exists)
+#      folder = results/<date_time>_<mode>, plus _quick and/or _nort if those were used
+#      (and make sure ~/stress_tmp exists)
 #      (a new folder every run, so nothing is overwritten,
-#       and the name tells you which mode produced it)
+#       and the name tells you how it was run)
+#      the folder will only ever hold two files: summary.log and raw.log
 #
-# [STEP 6] WRITE metadata.txt, START summary.log
-#      mode, date, kernel version
+# [STEP 6] START summary.log WITH THE RUN INFO
+#      folder, mode, options (rt yes/no, quick yes/no), date, kernel version
 #      CPU governor        (or "unknown" if this machine doesn't expose it)
 #      plugged in or not   (or "unknown")
-#      git commit          (only if we're inside a git repo)
+#      git commit          ("unknown" if we're not inside a git repo)
 #      build flags + compiler version (thread mode only)
 #      measured core, priority, load cores
 #      which cores the kernel isolated, core 6's hyperthread sibling, boot options
 #      (numbers without this context can't be compared later)
-#      summary.log: header (folder, mode, commit, build, core) and column titles.
-#      The rows get added by run_test, one per test.
+#      then the column titles. The rows get added by run_test, one per test.
 #
 # [STEP 7] WARN IF NO CORE IS ISOLATED, OR ON BATTERY
 #      if the kernel isolated no cores -> print a warning, but keep going
@@ -336,25 +368,27 @@ echo "Done. Results in $RESULTS_DIR"
 #      (otherwise sudo times out partway through the 45-minute soak,
 #       and the later steps that need root fail)
 #
-# [STEP 9] DEFINE measure(name, duration)
+# [STEP 9] DEFINE measure(duration)
+#      every tool writes its output to current_test.log (read right after, then moved)
 #      if mode is thread:
-#          run ./thread --rt --cpu 6 as root   (it pins its control thread to core 6)
+#          run ./thread as root, with --rt --cpu 6 unless --no-rt was given
+#          (with them it locks memory, raises priority, pins its control thread to core 6)
 #          after <duration>, send it Ctrl-C (SIGINT)
 #          -> it shuts down normally and prints its stats
-#          save its normal output AND its error output to <name>.log
+#          save its normal output AND its error output
 #          (the error output says whether real-time mode actually took effect)
 #      else:
 #          run cyclictest as root: 1 ms period, priority 80, ONE thread pinned to
 #          core 6, memory locked, quiet, with a histogram up to 400 us, for <duration>
-#          save its output to <name>.log
 #          (the histogram is what lets summary_row work out p99 and p99.9)
 #
-# [STEP 10] DEFINE summary_row(name) AND run_test(name, duration, load options...)
-#      summary_row: read the test's log, append one row to summary.log
+# [STEP 10] DEFINE summary_row(name), keep_raw(name) AND run_test(name, duration, load...)
+#      summary_row: read current_test.log, append one row to summary.log
 #          log missing or empty -> n/a
 #          thread mode     -> avg / p99 / p99.9 / max from the program's "jitter:" line
 #                             (any value it doesn't print -> n/a)
-#                             note "RT ok" only if priority 80 was applied AND the
+#                             note "RT off" if --no-rt was given, otherwise
+#                             "RT ok" only if priority 80 was applied AND the
 #                             control thread was pinned to core 6, else "RT FAILED"
 #          cyclictest mode -> avg and max from its own summary lines
 #                             p99 / p99.9 from the histogram:
@@ -362,15 +396,18 @@ echo "Done. Results in $RESULTS_DIR"
 #                             walk the buckets from 0 us upward, adding up counts
 #                             p99 / p99.9 = first bucket where the sum reaches 99% / 99.9%
 #                             never reached -> ">=400" (it's in the overflow)
+#      keep_raw: append "===== <name> =====" and current_test.log to raw.log,
+#          then delete current_test.log
 #      run_test:
 #      print the test name
 #      if load options were given:
 #          start stress-ng with those options in the background, for <duration>,
 #          on the load cores only (never core 6)
-#      measure(name, duration)                  (runs at the same time as the load)
+#      measure(duration)                        (runs at the same time as the load)
 #      if a load was started: wait for it to finish
 #          (so it doesn't leak into the next test)
 #      summary_row(name)                        (one row per test, written as it finishes)
+#      keep_raw(name)                           (raw output saved, scratch file gone)
 #
 # [STEP 11] RUN THE TESTS, 2 minutes each
 #      01 idle            no load at all                   -> best case
@@ -379,16 +416,17 @@ echo "Done. Results in $RESULTS_DIR"
 #      04 memory          memory bandwidth on 7 cores      -> shared cache / memory bus
 #      05 combined robot  a bit of everything              -> roughly a real robot computer
 #
-# [STEP 12] SOAK TEST, 45 minutes
+# [STEP 12] SOAK TEST, 45 minutes   (skipped with --quick)
 #      run_test with the combined load, but every load core busy, for 45 minutes
 #      (rare spikes only show up over long runs. The worst case is what matters.)
 #
-# [STEP 13] HARDWARE CHECK, 5 minutes, no load
+# [STEP 13] HARDWARE CHECK, 5 minutes, no load   (skipped with --quick)
 #      run hwlatdetect as root
 #      (finds stalls caused by the hardware or firmware itself, e.g. SMIs.
 #       If these are big, no software change can fix them.)
 #      add its worst gap as one line UNDER the summary table
 #      (it measures the machine, not the loop, so it isn't compared)
+#      keep_raw("07_hwlatdetect")
 #
 # [STEP 14] SHOW summary.log, PRINT where the results are, and exit
 #      (the exit triggers the cleanup from [STEP 8], which stops the sudo loop)

@@ -20,16 +20,22 @@ fi
 # NR == FNR is only true while awk reads the first file, so that's file A
 awk '
   NR == FNR { f = 1 } NR != FNR { f = 2 }
-  /^rt_bench summary:/ || /^mode:/ || /^measured:/ { head[f] = head[f] "     " $0 "\n" }
+  # the header lines worth showing; the rest of the run info stays in summary.log
+  /^(rt_bench summary|mode|options|git commit|build flags|rt cpu):/ { head[f] = head[f] "     " $0 "\n" }
   # table rows start with a test number like "01_". Each value is followed by its unit:
   #   01_idle   4 us   9 us   15 us   45 us   RT ok
   #   $1        $2     $4     $6      $8      $10...
   # (the hwlatdetect line under the table does not start with a number, so it is skipped)
   /^[0-9][0-9]_/ {
     avg[f, $1] = $2; p99[f, $1] = $4; p999[f, $1] = $6; mx[f, $1] = $8
-    if (f == 1) order[++count] = $1
-    if (f == 2) { note = ""; for (i = 10; i <= NF; i++) note = note " " $i; notes[$1] = note }
+    note = ""; for (i = 10; i <= NF; i++) note = note (note == "" ? "" : " ") $i
+    notes[f, $1] = (note == "" ? "-" : note)        # cyclictest rows have no notes
+    # every test from both files, A first. A --quick run has no 06, so 06 must
+    # still show up when only the other run has it.
+    if (!($1 in seen)) { seen[$1] = 1; order[++count] = $1 }
   }
+  # "A / B us", with n/a for a test that one of the runs does not have
+  function pair(a, b) { return (a == "" ? "n/a" : a) " / " (b == "" ? "n/a" : b) " us" }
   # B minus A, e.g. "+85 us". "-" when either side is "n/a" or ">=400" (no exact value)
   function diff(a, b) {
     if (a !~ /^[0-9]+$/ || b !~ /^[0-9]+$/) return "-"
@@ -40,12 +46,14 @@ awk '
     print "latency = how late the 1 ms wake-up was, in microseconds (us). diff = B - A"
     print ""
     fmt = "%-18s %14s %14s %15s %10s %15s %10s  %s\n"
-    printf fmt, "test", "avg A / B", "p99 A / B", "p99.9 A / B", "p99.9 diff", "max A / B", "max diff", "notes (B)"
+    printf fmt, "test", "avg A / B", "p99 A / B", "p99.9 A / B", "p99.9 diff", "max A / B", "max diff", "notes A | B"
     for (i = 1; i <= count; i++) {
       t = order[i]
-      printf fmt, t, avg[1, t] " / " avg[2, t] " us", p99[1, t] " / " p99[2, t] " us",
-             p999[1, t] " / " p999[2, t] " us", diff(p999[1, t], p999[2, t]),
-             mx[1, t] " / " mx[2, t] " us", diff(mx[1, t], mx[2, t]), notes[t]
+      na = notes[1, t]; if (na == "") na = "n/a"
+      nb = notes[2, t]; if (nb == "") nb = "n/a"
+      printf fmt, t, pair(avg[1, t], avg[2, t]), pair(p99[1, t], p99[2, t]),
+             pair(p999[1, t], p999[2, t]), diff(p999[1, t], p999[2, t]),
+             pair(mx[1, t], mx[2, t]), diff(mx[1, t], mx[2, t]), na " | " nb
     }
   }' "$1/summary.log" "$2/summary.log"
 
@@ -58,11 +66,12 @@ awk '
 #
 # [STEP 2] READ BOTH SUMMARIES, PRINT THEM SIDE BY SIDE
 #      for each file (A = baseline, B = thread):
-#          keep its header lines (folder, mode/commit/build, measured core)
-#          for each test row: remember avg, p99, p99.9, max
-#          (and B's notes, so "RT FAILED" shows up)
-#      print both headers, then one line per test, in A's order:
-#          avg, p99, p99.9 and max as A / B, plus p99.9 diff and max diff, B's notes
+#          keep its key header lines (folder, mode, options, commit, build, rt cpu)
+#          for each test row: remember avg, p99, p99.9, max and the notes
+#      print both headers, then one line per test, every test from both files (A's first):
+#          avg, p99, p99.9 and max as A / B, plus p99.9 diff and max diff
+#          notes as A | B, so "RT ok", "RT off" or "RT FAILED" shows for both runs
+#          a test only one run has (e.g. the soak, missing from a --quick run) -> n/a
 #          (the hwlatdetect line isn't compared: it measures the machine, not the loop)
 #          diff = B - A, only when both are exact numbers ("n/a" or ">=400" -> "-")
 #      all numbers are microseconds

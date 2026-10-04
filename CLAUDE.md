@@ -26,7 +26,7 @@ what exists, decisions, and history, lives in `PROJECT_CONTEXT.md`.
 ## Rules
 - Benchmark load commands stay byte-identical across runs, so before/after comparisons stay valid.
 - Every benchmark result keeps its metadata (kernel, CPU governor, power source, commit,
-  build flags).
+  build flags, isolation) in the header of its `summary.log`.
 - Real-time hot paths: no allocation, locks, blocking I/O, or printing.
 
 ## When asked for pseudocode in a file
