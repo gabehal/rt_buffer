@@ -13,6 +13,7 @@
 #include <sched.h> 
 #include <cctype>
 #include <numeric>   // for std::accumulate
+#include <atomic>
 
 
 // std::mutex cout_mtx;
