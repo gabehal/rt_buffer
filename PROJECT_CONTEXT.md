@@ -44,14 +44,16 @@ The program measures three numbers, all in microseconds:
 ## How to build and run
     g++ -std=c++17 -O2 -pthread thread.cpp -o thread   # same command on the Mac and on Linux
     ./thread            # press Ctrl-C to stop and print the stats
-    sudo ./thread --rt  # locks memory and gives the control thread real-time priority
+    sudo ./thread --rt --cpu 6  # real-time mode, control thread pinned to core 6
     ./rt_bench.sh           # Linux only: kernel baseline with cyclictest
     ./rt_bench.sh --thread  # Linux only: same battery, with this program instead
     ./summarize.sh results/<baseline folder> results/<thread folder>   # side-by-side comparison
 
 `--rt` locks all memory in RAM (`mlockall`), so the loop never stalls on a page fault.
-It also puts the control thread on `SCHED_FIFO` priority 50. Both need root on Linux. The
-planned changes to priority 80 and `--cpu` are listed under "What's next".
+It also puts the control thread on `SCHED_FIFO` priority 80. `--cpu N` pins the control thread
+to core N. Pinning only exists on Linux, so on the Mac it prints "CPU pinning skipped". All of
+these need root on Linux. The first 100 ticks (`warmup_ticks`) aren't recorded, because they
+can run before the pinning and priority take effect.
 
 **Isolating core 6 (one-time setup on the Linux machine).** Add these to the kernel boot
 command line, e.g. in `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run `update-grub` and
@@ -83,16 +85,15 @@ Disk tests write their temporary files to `~/stress_tmp`.
 ## Where things stand
 The pipeline builds and runs on the Mac and prints its statistics. On 2026-10-03 the test list,
 the measured core, the priority, and the metrics all changed, so any earlier cyclictest
-baseline is out of date and needs re-running. `rt_bench.sh` is ready for the new design.
-`thread.cpp` isn't yet: it doesn't pin to core 6, still uses priority 50, and doesn't print
-avg or p99.9. Until it does, thread-mode rows show `n/a` for those and "RT FAILED". The
-summary parsing was tested on the Mac with hand-made logs in the format from cyclictest's
-source code and with sample `thread` output. It hasn't been checked against real cyclictest
+baseline is out of date and needs re-running. `rt_bench.sh` and `thread.cpp` are both ready
+for the new design. The program's pinning hasn't been run on Linux yet. On the Mac its output
+parses into all four summary columns. The cyclictest parsing was tested with hand-made logs in
+the format from cyclictest's source code, but hasn't been checked against real cyclictest
 output yet.
 
 **Comparing the two runs.** cyclictest's latency is how late it woke up after its 1 ms timer,
 which is the same idea as this program's `jitter`. Both are in microseconds. Both run one
-thread on core 6 at priority 80, so the comparison is fair once `thread.cpp` is updated. Use
+thread on core 6 at priority 80, so the comparison is fair. Use
 `summarize.sh` with the baseline folder first and the thread folder second.
 
 **What `rt_bench.sh` expects from `thread.cpp`.** It runs `./thread --rt --cpu 6` and reads
@@ -131,6 +132,10 @@ three lines from its output:
   and memory bandwidth are the main ways other cores still interfere. STREAM pushes the
   memory bus harder than `--vm`. A huge `--vm-bytes` was ruled out because it would push the
   machine into swapping.
+- **2026-10-03: the first 100 control ticks are not recorded.** The control thread starts running
+  before `main` pins it and raises its priority, so its first ticks can be slow, and one of
+  them could end up as the reported max. Skipping 100 ticks (100 ms) is simpler than having the
+  thread set itself up before its loop.
 - **2026-10-03: the soak uses one histogram for the whole 45 minutes**, not latency over time.
   cyclictest can't produce a time series.
 - **2026-10-02: keep things simple.** The summary code was first written as a separate step
@@ -146,24 +151,23 @@ three lines from its output:
 - **Type and ordering mismatch.** `head` and `tail` are `size_t` but get loaded into `int`.
   `read()` uses the default (strongest) memory ordering. Is acquire enough?
 - `<atomic>` isn't included directly. The code only compiles because another header pulls it in.
-- The log thread busy-waits, which burns a whole CPU core.
+- The log thread busy-waits, which burns a whole CPU core. With core isolation it runs on the
+  load cores, not core 6.
 
 ## What's next
-1. Update `thread.cpp` to match the new benchmark (user writes this):
-   - parse `--cpu N` in the argument loop, next to `--rt`;
-   - pin the control thread with `pthread_setaffinity_np` next to `pthread_setschedparam`,
-     print `control thread pinned to CPU N`, and wrap it in `#ifdef __linux__` because the
-     call doesn't exist on the Mac;
-   - change the priority from 50 to 80;
-   - add `avg=` and `p99.9=` to the `jitter:` report line.
-2. Set up core isolation on the Linux machine (see "Isolating core 6") and check for an SMT sibling.
-3. Run `./rt_bench.sh` for a fresh baseline. Check that its `summary.log` has real numbers rather
+1. Set up core isolation on the Linux machine (see "Isolating core 6") and check for an SMT sibling.
+2. Run `./rt_bench.sh` for a fresh baseline. Check that its `summary.log` has real numbers rather
    than `n/a`, which confirms the parser matches real cyclictest output. Then run
    `./rt_bench.sh --thread` and `./summarize.sh <baseline folder> <thread folder>`, and check
    every row says "RT ok".
-4. Design and build an SPSC queue for `log_ring`, so no samples are lost.
+3. Design and build an SPSC queue for `log_ring`, so no samples are lost.
 
 ## Change log
+### 2026-10-03: thread.cpp matches the isolated-core benchmark
+Added `--cpu N` (pins the control thread with `pthread_setaffinity_np`, Linux only) and raised
+the priority to 80. The first 100 ticks are now skipped, and the report lines gained `avg=`
+and `p99.9=`.
+
 ### 2026-10-03: Isolated core 6 and a new test list
 `rt_bench.sh` now measures only core 6, using one pinned cyclictest thread or the program with
 `--cpu 6`, both at priority 80. All stress-ng load is pinned to cores 0-5 and 7, and disk temp

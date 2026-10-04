@@ -10,6 +10,9 @@
 #include <cstring>   // for strcmp
 #include <pthread.h> // for pthread_setschedparam, sched_param, SCHED_FIFO
 #include <sys/mman.h>
+#include <sched.h> 
+#include <cctype>
+#include <numeric>   // for std::accumulate
 
 
 // std::mutex cout_mtx;
@@ -79,10 +82,20 @@ class RingBuffer{
 
 int main(int argc, char* argv[]){
     bool use_rt = false;
+    int cpu_core=-1;
     for (int i=0; i<argc; ++i){
         if (strcmp(argv[i], "--rt") == 0){
             // enable real-time mode
             use_rt = true;
+        }
+        else if (strcmp(argv[i], "--cpu") == 0){
+            // set isolated cpu to what we set
+            if (i+1>= argc || !isdigit(argv[i+1][0])){
+                std::cerr << "Invalid CPU index for --cpu option\n";
+                return 1;
+            }
+            cpu_core = std::atoi(argv[i+1]); 
+            ++i; 
         }
     }
 
@@ -141,7 +154,8 @@ int main(int argc, char* argv[]){
 
         std::chrono::steady_clock::time_point sleep_till = std::chrono::steady_clock::now()+std::chrono::milliseconds(1);
 
-
+        int tick=0; 
+        const int warmup_ticks= 100; 
         while(!shutdown_requested){
             std::chrono::steady_clock::time_point time= std::chrono::steady_clock::now();
  
@@ -172,20 +186,48 @@ int main(int argc, char* argv[]){
 
             sleep_till += std::chrono::milliseconds(1);
 
-            log_ring.write(delay_log);
-
+            if (++tick > warmup_ticks) {
+                log_ring.write(delay_log);
             }
-        
+        }
     });
 
+#ifdef __linux__
+    // cpu_set_t and pthread_setaffinity_np only exist on Linux ("_np" = non-portable),
+    // so this block is compiled out on the Mac
+    if (cpu_core >= 0) {
+        // the "light switch row": one bit per core, starts as garbage
+        cpu_set_t cpuset;
+
+        // turn every switch off so we start from a known state
+        CPU_ZERO(&cpuset);
+
+        // turn on only the switch for the core the user asked for
+        CPU_SET(cpu_core, &cpuset);
+
+        // hand the switch row to the kernel for this specific thread
+        int r = pthread_setaffinity_np(t_control.native_handle(), sizeof(cpu_set_t), &cpuset);
+
+        // 0 means success, anything else is an error code we can turn into text
+        if (r != 0) {
+            std::cerr << "CPU pin FAILED: " << strerror(r) << "\n";
+        } else {
+            std::cerr << "control thread pinned to CPU " << cpu_core << "\n";
+        }
+    }
+#else
+    if (cpu_core >= 0) {
+        std::cerr << "CPU pinning skipped (not Linux)\n";
+    }
+#endif
     if (use_rt) {
     sched_param param;
-    param.sched_priority = 50;
+    param.sched_priority = 80;
     int result = pthread_setschedparam(t_control.native_handle(), SCHED_FIFO, &param);
     if (result != 0) {
         std::cerr << "SCHED_FIFO request FAILED: " << strerror(result) << "\n";
     } else {
-        std::cerr << "SCHED_FIFO priority 50 applied to control thread\n";
+        std::cerr << "SCHED_FIFO priority " << param.sched_priority <<" applied to control thread\n";
     }
     }
 
@@ -214,11 +256,16 @@ int main(int argc, char* argv[]){
             
             std::sort(v.begin(), v.end());
             auto pct= [&](double percentile){return v[(size_t)((v.size()-1)*percentile)];};
+            // 0ULL makes the running sum 64-bit. A plain 0 would make it int, which can
+            // overflow over a 45 min soak (~2.7M samples). Whole microseconds, like cyclictest's avg.
+            unsigned long long avg = std::accumulate(v.begin(), v.end(), 0ULL) / v.size();
 
             std::cout << name << ": n=" << v.size()
               << " min=" << v.front()
+              << " avg=" << avg
               << " p50=" << pct(0.50)
               << " p99=" << pct(0.99)
+              << " p99.9=" << pct(0.999)
               << " max=" << v.back() << " (us)\n";
             
 
