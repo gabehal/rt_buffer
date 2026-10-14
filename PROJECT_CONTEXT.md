@@ -29,6 +29,14 @@ inputs are `torque_cmd` (the controller's last command) and `torque_ext` (an out
   remainder, so the physics stays accurate however late the caller is.
 - The constructor takes the start time, so `last_time` can't be left uninitialised.
 
+## Simulated encoder (`sensors.h`)
+`Sensors` turns the joint angle into whole encoder counts, the way a real encoder would.
+An encoder is a sensor that reports rotation as a whole number of ticks; this one has 4096
+counts per revolution, so one count is about 1.5 mrad.
+- `angle_to_counts(angle)` rounds down (`floor`), so negative angles land in the right count.
+- `counts_to_angle(counts)` returns the middle of that count, so the error is at most half a
+  count either way.
+
 ## Files
 - `thread.cpp`: the program.
 - `rt_bench.sh`: Linux benchmark. Measures only the isolated core 6; all load runs on cores
@@ -38,8 +46,10 @@ inputs are `torque_cmd` (the controller's last command) and `torque_ext` (an out
   - `raw.log`: every tool's raw output, only for debugging.
 - `summarize.sh`: compares any two runs' `summary.log` side by side.
 - `sim_robot.h`: the simulated joint (see above).
+- `sensors.h`: the simulated encoder (see above).
 - `sim_check.cpp`: checks `sim_robot.h` against the exact formulas for constant torque from
-  rest. Speed must be within 0.1%, angle within 2%. Exits non-zero (assert) on failure.
+  rest (speed within 0.1%, angle within 2%), and that angle → counts → angle in `sensors.h`
+  lands within half a count. Exits non-zero (assert) on failure.
 - `.gitignore`: keeps the `thread` and `sim_check` binaries and `results/` out of git.
 
 ## How to build and run
@@ -125,6 +135,8 @@ other, or tell Claude.
 4. Drive `SimRobot` from the control loop.
 
 ## Change log
+- **2026-10-14:** added `sensors.h` (simulated 4096-count encoder) and a round-trip check for
+  it in `sim_check.cpp`.
 - **2026-10-14:** added `sim_robot.h` (simulated joint) and `sim_check.cpp` (its accuracy
   check); `thread.cpp` includes the header. `<atomic>` is now included in `thread.cpp`, and
   `results/` is ignored by git.
