@@ -1,3 +1,6 @@
 # Compiled binaries
 /thread
+/sim_check
+
+# Benchmark output
 /results

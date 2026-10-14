@@ -14,6 +14,7 @@
 #include <cctype>
 #include <numeric>   // for std::accumulate
 #include <atomic>
+#include "sim_robot.h" 
 
 
 // std::mutex cout_mtx;

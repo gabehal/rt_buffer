@@ -1,6 +1,6 @@
 # Project Context
 
-Last updated: 2026-10-04
+Last updated: 2026-10-14
 
 ## What this project is
 A hands-on way to learn real-time C++: a 1 ms control loop with as little timing error
@@ -17,6 +17,17 @@ A hands-on way to learn real-time C++: a 1 ms control loop with as little timing
 - `--rt`: locks memory (`mlockall`) and runs control at `SCHED_FIFO` priority 80.
   `--cpu N`: pins control to core N (Linux only; skipped with a message on the Mac).
 - The first 100 ticks aren't recorded, because they can run before pinning and priority apply.
+- `thread.cpp` includes `sim_robot.h` but doesn't use it yet.
+
+## Simulated robot (`sim_robot.h`)
+One joint (a wheel on an axle) for the control loop to drive later. Physics only, no clocks
+or threads. Inertia J = 0.01 and friction b = 0.05 are fixed. State is `angle` and `speed`;
+inputs are `torque_cmd` (the controller's last command) and `torque_ext` (an outside push).
+- `step(dt)` advances the physics by `dt` seconds (explicit Euler: acceleration, then speed,
+  then angle).
+- `catch_up(now)` advances from `last_time` to `now` in 50 µs slices plus one shorter
+  remainder, so the physics stays accurate however late the caller is.
+- The constructor takes the start time, so `last_time` can't be left uninitialised.
 
 ## Files
 - `thread.cpp`: the program.
@@ -26,10 +37,14 @@ A hands-on way to learn real-time C++: a 1 ms control loop with as little timing
     "RT off" or "RT FAILED" in thread mode), and the hwlatdetect result under the table.
   - `raw.log`: every tool's raw output, only for debugging.
 - `summarize.sh`: compares any two runs' `summary.log` side by side.
-- `.gitignore`: keeps the compiled `thread` binary out of git.
+- `sim_robot.h`: the simulated joint (see above).
+- `sim_check.cpp`: checks `sim_robot.h` against the exact formulas for constant torque from
+  rest. Speed must be within 0.1%, angle within 2%. Exits non-zero (assert) on failure.
+- `.gitignore`: keeps the `thread` and `sim_check` binaries and `results/` out of git.
 
 ## How to build and run
     g++ -std=c++17 -O2 -pthread thread.cpp -o thread   # Mac and Linux
+    g++ -std=c++17 sim_check.cpp -o sim_check && ./sim_check   # silent = pass
     sudo ./thread --rt --cpu 6       # Ctrl-C stops it and prints the stats
     ./rt_bench.sh                    # Linux: kernel baseline with cyclictest
     ./rt_bench.sh --thread           # Linux: same tests with this program
@@ -99,7 +114,6 @@ other, or tell Claude.
 - **Possible torn read:** can the writer overwrite a slot while the reader is copying it?
 - `head`/`tail` are `size_t` but loaded into `int`. `read()` uses a seq_cst load where
   acquire may be enough.
-- `<atomic>` isn't included directly.
 - The log thread busy-waits (on the load cores, not core 6).
 
 ## What's next
@@ -108,8 +122,12 @@ other, or tell Claude.
    `./rt_bench.sh --thread --quick` and `summarize.sh`: every row should say "RT ok". Then the
    full runs.
 3. Build an SPSC queue for `log_ring`.
+4. Drive `SimRobot` from the control loop.
 
 ## Change log
+- **2026-10-14:** added `sim_robot.h` (simulated joint) and `sim_check.cpp` (its accuracy
+  check); `thread.cpp` includes the header. `<atomic>` is now included in `thread.cpp`, and
+  `results/` is ignored by git.
 - **2026-10-04:** trimmed this file.
 - **2026-10-03:** two files per run, `--quick`, `--no-rt`. Measure only isolated core 6 at
   priority 80, with a new test list and avg/p99/p99.9/max. `thread.cpp` gained `--cpu`
