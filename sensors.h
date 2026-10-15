@@ -1,7 +1,8 @@
 #pragma once 
 #include <cmath>
+#include <random>
 
-struct Sensors{
+struct Encoder{
 
     static constexpr double pi = 3.14159265358979323846; // static means one shared copy across all instances
     static constexpr int counts_per_rev = 4096; // constexpr means value knows at build time
@@ -19,4 +20,33 @@ struct Sensors{
 
         return angle;
     }
+};
+
+struct Gyro{
+
+    double bias= 0.02; 
+    double noise_std = 0.002;
+    double drift = 0.005;
+    double last_time;
+    std::mt19937 engine;
+    std::normal_distribution<double> unit_normal{0.0, 1.0};
+
+    explicit Gyro(double start_time, unsigned seed) : last_time(start_time), engine(seed) {}
+
+    double read_speed (double now, double true_speed){
+
+        double elapsed = now - last_time;
+        if (elapsed > 0) {
+            bias += drift* std::sqrt(elapsed) * unit_normal(engine); 
+            last_time = now;
+        }  
+        
+        double hiss = noise_std* unit_normal(engine);
+
+        double reading = true_speed + bias + hiss;
+        
+
+        return reading; 
+    }
+
 };
