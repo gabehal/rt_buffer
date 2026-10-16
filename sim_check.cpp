@@ -4,6 +4,7 @@
 #include <array>
 #include "sim_robot.h"
 #include "sensors.h"
+#include "estimators.h"
 
 int main() {
     // 1. make a robot that starts at time 0

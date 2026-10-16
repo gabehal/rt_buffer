@@ -1,6 +1,6 @@
 # Project Context
 
-Last updated: 2026-10-14
+Last updated: 2026-10-16
 
 ## What this project is
 A hands-on way to learn real-time C++: a 1 ms control loop with as little timing error
@@ -46,6 +46,11 @@ counts per revolution, so one count is about 1.5 mrad.
 - `read_speed(now, true_speed)` returns true speed + bias + hiss. The constructor takes the
   start time and a random seed, so a run can be repeated exactly.
 
+## Estimators (`estimators.h`)
+**`DiffEstimator`** estimates speed from encoder counts: (change in counts × size of one
+count) ÷ time since the last update. The constructor takes the start time and start count.
+If no time has passed, `update` returns 0.0. Nothing tests it yet.
+
 ## Files
 - `thread.cpp`: the program.
 - `rt_bench.sh`: Linux benchmark. Measures only the isolated core 6; all load runs on cores
@@ -56,6 +61,7 @@ counts per revolution, so one count is about 1.5 mrad.
 - `summarize.sh`: compares any two runs' `summary.log` side by side.
 - `sim_robot.h`: the simulated joint (see above).
 - `sensors.h`: the simulated encoder and gyro (see above).
+- `estimators.h`: speed estimators built on the sensors (see above).
 - `sim_check.cpp`: checks `sim_robot.h` against the exact formulas for constant torque from
   rest (speed within 0.1%, angle within 2%), and that angle → counts → angle in `sensors.h`
   lands within half a count. For the gyro: with randomness off, a reading is exactly truth +
@@ -146,6 +152,8 @@ other, or tell Claude.
 4. Drive `SimRobot` from the control loop.
 
 ## Change log
+- **2026-10-16:** added `estimators.h` with `DiffEstimator` (speed from encoder count
+  differences); `sim_check.cpp` includes it but doesn't test it yet.
 - **2026-10-14:** `Sensors` renamed to `Encoder`; added `Gyro` (drifting bias plus noise) to
   `sensors.h` and two checks for it in `sim_check.cpp`.
 - **2026-10-14:** added `sensors.h` (simulated 4096-count encoder) and a round-trip check for
