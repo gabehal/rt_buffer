@@ -1,6 +1,6 @@
 # Project Context
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 ## What this project is
 A hands-on way to learn real-time C++: a 1 ms control loop with as little timing error
@@ -51,6 +51,20 @@ counts per revolution, so one count is about 1.5 mrad.
 count) ÷ time since the last update. The constructor takes the start time and start count.
 If no time has passed, `update` returns 0.0. Nothing tests it yet.
 
+## Controller (`controllers.h`)
+**`PDController`** computes motor torque from the position error and the speed error:
+`kp * (target - angle) + kd * (target_speed - speed)`, with defaults kp = 900 and kd = 6.
+
+`pd_check.cpp` runs the controller against `SimRobot` at 1 ms ticks for 0.2 s (target
+0.1 rad) for kd = 1, 3, 6 and 12. Each runs twice: once with the true angle and speed, and
+once "measured" (angle from `Encoder` counts, speed from `DiffEstimator`). It prints a table
+of overshoot, settle time (last time outside a 2% band), chatter (torque range over the last
+50 ticks) and final error. It prints numbers to compare; it doesn't assert anything.
+
+What it showed on 2026-10-17: kd = 6 settles fastest with no overshoot. With measured
+signals, chatter grows with kd (about 20 N·m at kd = 6, 58 N·m at kd = 12), because kd
+multiplies the coarse speed estimate.
+
 ## Files
 - `thread.cpp`: the program.
 - `rt_bench.sh`: Linux benchmark. Measures only the isolated core 6; all load runs on cores
@@ -62,16 +76,18 @@ If no time has passed, `update` returns 0.0. Nothing tests it yet.
 - `sim_robot.h`: the simulated joint (see above).
 - `sensors.h`: the simulated encoder and gyro (see above).
 - `estimators.h`: speed estimators built on the sensors (see above).
+- `controllers.h`, `pd_check.cpp`: the PD controller and its comparison run (see above).
 - `sim_check.cpp`: checks `sim_robot.h` against the exact formulas for constant torque from
   rest (speed within 0.1%, angle within 2%), and that angle → counts → angle in `sensors.h`
   lands within half a count. For the gyro: with randomness off, a reading is exactly truth +
   0.02; over 500 seeds, the bias spread after 1 s is within 15% of drift * sqrt(1 s).
   Exits non-zero (assert) on failure.
-- `.gitignore`: keeps the `thread` and `sim_check` binaries and `results/` out of git.
+- `.gitignore`: keeps the `thread`, `sim_check` and `pd_check` binaries and `results/` out of git.
 
 ## How to build and run
     g++ -std=c++17 -O2 -pthread thread.cpp -o thread   # Mac and Linux
     g++ -std=c++17 sim_check.cpp -o sim_check && ./sim_check   # silent = pass
+    g++ -std=c++17 pd_check.cpp -o pd_check && ./pd_check      # prints the kd table
     sudo ./thread --rt --cpu 6       # Ctrl-C stops it and prints the stats
     ./rt_bench.sh                    # Linux: kernel baseline with cyclictest
     ./rt_bench.sh --thread           # Linux: same tests with this program
@@ -152,6 +168,8 @@ other, or tell Claude.
 4. Drive `SimRobot` from the control loop.
 
 ## Change log
+- **2026-10-17:** added `controllers.h` (`PDController`) and `pd_check.cpp`, which compares
+  kd values with true and measured signals.
 - **2026-10-16:** added `estimators.h` with `DiffEstimator` (speed from encoder count
   differences); `sim_check.cpp` includes it but doesn't test it yet.
 - **2026-10-14:** `Sensors` renamed to `Encoder`; added `Gyro` (drifting bias plus noise) to
